@@ -1,0 +1,9 @@
+pytz
+httpx
+requests
+python-dateutil
+decorator
+attrs
+html2text
+fastapi
+aiosqlite

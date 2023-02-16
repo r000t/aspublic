@@ -74,7 +74,7 @@ async def search(dbpath, q: str, bots: bool = None, replies: bool = None, attach
         results = []
         async with db.execute(sqlitequery, ('%%%s%%' % q,)) as cursor:
             async for row in cursor:
-                results.append(minimalStatus(url=row[0],
+                results.append(minimalStatus(url= "https://" + row[0],
                                              text=row[1],
                                              subject=row[2],
                                              created=datetime.fromtimestamp(int((row[3]))).isoformat(),
