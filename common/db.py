@@ -19,8 +19,23 @@ def initdb(dbpath):
     con = sqlite3.connect(dbpath)
     cur = con.cursor()
     cur.execute("PRAGMA page_size=8192;")
-    cur.execute("CREATE TABLE statuses(url TEXT NOT NULL PRIMARY KEY, text TEXT, subject TEXT, created INT NOT NULL, language TEXT, bot INT NOT NULL, reply INT NOT NULL, attachments INT NOT NULL)")
+    cur.execute("CREATE TABLE statuses(url TEXT NOT NULL PRIMARY KEY, text TEXT, subject TEXT, created INT NOT NULL, language TEXT, bot INT NOT NULL, reply INT NOT NULL, attachments INT NOT NULL);")
     cur.execute("CREATE INDEX statuses_created ON statuses (created);")
+    cur.execute("CREATE VIRTUAL TABLE fts_status USING fts5(text, subject, content = 'statuses', detail = none, tokenize = 'trigram');")
+    cur.execute('''
+                CREATE TRIGGER IF NOT EXISTS statuses_ai AFTER INSERT ON statuses BEGIN
+                  INSERT INTO fts_status(rowid, text, subject) VALUES (new.ROWID, new.text, new.subject);
+                END;''')
+    cur.execute('''
+                CREATE TRIGGER IF NOT EXISTS statuses_ad AFTER DELETE ON statuses BEGIN
+                  INSERT INTO fts_status(fts_status, rowid, text, subject) VALUES('delete', old.ROWID, old.text, old.subject);
+                END;''')
+    cur.execute('''
+                CREATE TRIGGER IF NOT EXISTS statuses_au AFTER UPDATE ON statuses BEGIN
+                  INSERT INTO fts_status(fts_status, rowid, text, subject) VALUES('delete', old.ROWID, old.text, old.subject);
+                  INSERT INTO fts_status(rowid, text, subject) VALUES (new.ROWID, new.text, new.subject);
+                END;
+                ''')
     con.commit()
     con.close()
 
@@ -28,7 +43,7 @@ def initdb(dbpath):
 async def batchwrite(values: list, dbpath):
     async with aiosqlite.connect(dbpath) as db:
         await db.execute("PRAGMA cache_size=4000;")
-        await db.executemany("INSERT INTO statuses VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(url) DO NOTHING", values)
+        await db.executemany("INSERT INTO statuses VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(url) DO NOTHING;", values)
         await db.commit()
 
 
@@ -69,10 +84,10 @@ async def search(dbpath, q: str, bots: bool = None, replies: bool = None, attach
 
             options += ' created > %s AND' % after.timestamp()
 
-        sqlitequery = "SELECT * FROM statuses WHERE %s text like ? ORDER BY created DESC LIMIT %i;" % (options, int(limit))
+        sqlitequery = "SELECT * FROM statuses t JOIN fts_status f ON t.ROWID = f.ROWID WHERE fts_status MATCH ? %s ORDER BY created DESC LIMIT %i;" % (options, int(limit))
 
         results = []
-        async with db.execute(sqlitequery, ('%%%s%%' % q,)) as cursor:
+        async with db.execute(sqlitequery, ('"%s"' % q,)) as cursor:
             async for row in cursor:
                 results.append(minimalStatus(url= "https://" + row[0],
                                              text=row[1],

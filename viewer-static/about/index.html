@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>About as:Public</title>
+<link rel="stylesheet" type="text/css" href="/assets/aspublic.css">
+</head>
+<body>
+<div class="f0">
+<h3>as:Public (very) Early Demo</h3>
+    <h2><a href="/">Return Home</a></h2>
+<br />
+    <h2>How does it work?</h2>
+    <p>as:Public currently uses two components.</p>
+    <p>A <b>Collector</b> connects to instance public ("Federated") Streaming API endpoints.
+    Mastodon provides this Federated feed for discovery tools, such as this one.
+    Mastodon pushes all public statuses to anybody connected to this endpoint. This includes statuses that were sent to it by other instances.
+    It does <b>not</b> include statuses that are Unlisted, Followers-Only, or Private/DM.
+    The Collector stores these statuses in a portable file, for storage or for use with a Display.
+    Because we wait for servers to push data to us, we use virtually zero resources on their end.</p>
+    <p>A <b>Display</b> (the backend for this website) allows lookups against the files the Collector produces.
+    It is designed to be run on a machine separate from the collector. The Display software exposes an API that any application can use.
+    The garbage-tier HTML frontend I've written uses this API.</p>
+    <p>A third component is planned that receives information from multiple collectors, and writes them to a database server such as Postgres.</p>
+<br />
+    <h2>Can I run my own?</h2>
+    <p>The source code for all components will be released in the coming weeks.
+    The software is lightweight, and can run on any spare computer, project board, or VPS.
+    It is recommended that you run the Collector and Display on separate machines, with separate Internet connections.</p>
+<br />
+    <h2>How do I exclude my posts?</h2>
+    <p>Mastodon does not send to Streaming subscribers, any statuses that are in the Unlisted, Followers-Only, or Private/DM scopes. The use of one of these scopes would disqualify a status from indexing.</p>
+    <p>To prevent mistakes with software that might not behave like Mastodon, the actual status "object" is checked for its privacy scope.
+    This is actually the <i>first</i> thing done with any status that an instance sends to a Collector.</p>
+<br />
+    <h2>How do I exclude my instance?</h2>
+    <p>The Mastodon Streaming API can be disabled by an instance admin.</p>
+    <p>While this will prevent the Collector from subscribing to your instance, it will <b>not</b> prevent ingest from other instances.
+    Your instance sends a copy of every status to each instance at which the author has at least one follower.
+    The Collector will still be able to ingest statuses that it sees from other servers.</p>
+</div>
+</body>
+</html>

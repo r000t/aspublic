@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>I've got vision.</title>
+<link rel="stylesheet" type="text/css" href="/assets/aspublic.css">
+<meta property="og:title" content="as:Public Search" />
+<meta property="og:description" content="Self-hosted Fediverse search that's lightweight for both you and the network" />
+<meta property="og:image" content="/assets/logo.png" />
+</head><body>
+<div class="f0">
+<h3>as:Public (very) Early Demo</h3>
+<center>
+<img src="/assets/logo.png" width="50%" style="margin-top: 15%;" />
+<form action="/search" method="get">
+  <input type="text" class="home-searchbox" name="q" placeholder="Search text content of posts on the Fediverse">
+  <div style="align-items: center;">
+    <select class="home-selector" name="bots">
+      <option value="">Bots</option>
+      <option value="1">Only</option>
+      <option value="0">None</option>
+    </select>
+    <select class="home-selector" name="replies">
+      <option value="">Replies</option>
+      <option value="1">Only</option>
+      <option value="0">None</option>
+    </select>
+    <select class="home-selector" name="attachments">
+      <option value="">Media</option>
+      <option value="1">Only</option>
+      <option value="0">None</option>
+    </select>
+  </div>
+</form>
+<p>New statuses are intentionally delayed by a few hours.</p>
+<br />
+<div style="position: absolute; bottom: 0px; right: 2%;">
+<h2>v0.1.2 <a href="/about">About</a> / <a href="/docs">API</a></h2>
+</div>
+</body>
+</html>
