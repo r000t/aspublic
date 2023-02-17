@@ -21,7 +21,7 @@ def initdb(dbpath):
     cur.execute("PRAGMA page_size=8192;")
     cur.execute("CREATE TABLE statuses(url TEXT NOT NULL PRIMARY KEY, text TEXT, subject TEXT, created INT NOT NULL, language TEXT, bot INT NOT NULL, reply INT NOT NULL, attachments INT NOT NULL);")
     cur.execute("CREATE INDEX statuses_created ON statuses (created);")
-    cur.execute("CREATE VIRTUAL TABLE fts_status USING fts5(text, subject, content = 'statuses', detail = none, tokenize = 'trigram');")
+    cur.execute("CREATE VIRTUAL TABLE fts_status USING fts5(text, subject, content = 'statuses',  tokenize = \"unicode61 remove_diacritics=2\");")
     cur.execute('''
                 CREATE TRIGGER IF NOT EXISTS statuses_ai AFTER INSERT ON statuses BEGIN
                   INSERT INTO fts_status(rowid, text, subject) VALUES (new.ROWID, new.text, new.subject);
@@ -66,7 +66,7 @@ async def search(dbpath, q: str, bots: bool = None, replies: bool = None, attach
             if type(before) is date:
                 before = datetime.combine(before, datetime.min.time())
 
-            #Extra anti-skid checks, although FastAPI does validation
+            # Extra anti-skid checks, although FastAPI does validation
             if type(before) is not datetime:
                 raise "No."
             ts = int(before.timestamp())
@@ -77,14 +77,17 @@ async def search(dbpath, q: str, bots: bool = None, replies: bool = None, attach
             if type(after) is date:
                 after = datetime.combine(after, datetime.max.time())
 
-            #Extra anti-skid checks, although FastAPI does validation
+            # Extra anti-skid checks, although FastAPI does validation
             if type(after) is not datetime:
                 raise "No."
             ts = int(after.timestamp())
 
             options += ' created > %s AND' % after.timestamp()
 
-        sqlitequery = "SELECT * FROM statuses t JOIN fts_status f ON t.ROWID = f.ROWID WHERE fts_status MATCH ? %s ORDER BY created DESC LIMIT %i;" % (options, int(limit))
+        # As a reminder to anybody reading this code...
+        # PUTTING VARIABLES INTO A SQL QUERY WITHOUT USING PARAMETERIZATION (the ?s) IS AMAZINGLY, SPECTACULARLY, UNIMAGINABLY DANGEROUS.
+        # Don't use this as an example for your own code. I'm a professional, and I know what I'm doing. Now, hold my joint.
+        sqlitequery = 'SELECT * FROM statuses t JOIN fts_status f ON t.ROWID = f.ROWID WHERE %s fts_status MATCH ? ORDER BY created DESC LIMIT %i;' % (options, int(limit))
 
         results = []
         async with db.execute(sqlitequery, ('"%s"' % q,)) as cursor:

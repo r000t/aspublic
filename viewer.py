@@ -37,7 +37,7 @@ async def read_item(q: str = Query(title="Single search term to look for in stat
                     attachments: bool = None,
                     before: Union[datetime, date] = None,
                     after: Union[datetime, date] = None,
-                    limit: int = Query(default=20, ge=1, le=100, title="Number of results to return")):
+                    limit: int = Query(default=50, ge=1, le=100, title="Number of results to return")):
     """Early search function. Case-insensitive. Does not support operators. Entire query is treated as a single term.
     \n\nbots, replies, and attachments fields are optional. If they are not specified, or null, all posts are shown.
     If True, **only** that type of post will be shown. If False, that type of post will **not** be shown."""
