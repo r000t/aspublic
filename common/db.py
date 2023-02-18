@@ -21,7 +21,7 @@ def initdb(dbpath):
     cur.execute("PRAGMA page_size=8192;")
     cur.execute("CREATE TABLE statuses(url TEXT NOT NULL PRIMARY KEY, text TEXT, subject TEXT, created INT NOT NULL, language TEXT, bot INT NOT NULL, reply INT NOT NULL, attachments INT NOT NULL);")
     cur.execute("CREATE INDEX statuses_created ON statuses (created);")
-    cur.execute("CREATE VIRTUAL TABLE fts_status USING fts5(text, subject, content = 'statuses',  tokenize = \"unicode61 remove_diacritics=2\");")
+    cur.execute("CREATE VIRTUAL TABLE fts_status USING fts5(text, subject, content = 'statuses', tokenize = \"unicode61 remove_diacritics 2\");")
     cur.execute('''
                 CREATE TRIGGER IF NOT EXISTS statuses_ai AFTER INSERT ON statuses BEGIN
                   INSERT INTO fts_status(rowid, text, subject) VALUES (new.ROWID, new.text, new.subject);

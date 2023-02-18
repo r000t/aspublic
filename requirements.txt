@@ -1,9 +1,13 @@
-pytz
-httpx
 requests
 python-dateutil
+pytz
 decorator
 attrs
 html2text
-fastapi
 aiosqlite
+rich
+
+#Only needed for using the Viewer
+fastapi
+uvicorn[standard]
+

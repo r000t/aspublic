@@ -6,8 +6,14 @@ from fastapi.staticfiles import StaticFiles
 from time import time
 from datetime import datetime, date
 from common import db
+app = FastAPI(title="as:Public", version="0.1.2")
 
-app = FastAPI(title="as:Public")
+## Path to status database from a Collector
+#dbpath = 'statuses.sqlite3'
+dbpath = db.default_dbpath
+
+## Uncomment this line to serve static files from the application. You'll need to do that to run it locally.
+#app.mount("/", StaticFiles(directory="viewer-static", html=True), name="frontend")
 
 
 class StatusModel(BaseModel):
@@ -52,5 +58,3 @@ async def read_item(q: str = Query(title="Single search term to look for in stat
                               after=after)
 
     return {"results": results, "debug": {"dbtime_ms": int(((time() - begints) * 1000))}}
-
-app.mount("/", StaticFiles(directory="viewer-static", html=True), name="frontend")
