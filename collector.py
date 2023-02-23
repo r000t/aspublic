@@ -3,10 +3,9 @@ import asyncio
 import argparse
 from time import time
 from datetime import datetime, timezone
-from rich.console import Console
-from rich.table import Table
 from html2text import HTML2Text
 from mastodon import Mastodon, streaming
+from mastodon.errors import MastodonError
 from common import db
 from common.types import minimalStatus
 
@@ -17,8 +16,11 @@ parser.add_argument('-s', '--server', action='append', default=[],
                     help="Connect to this server. You can call this multiple times.")
 parser.add_argument('-l', '--list', action='append', default=[],
                     help="Read servers from this list. It can be a CSV if the first field is the domain.")
-parser.add_argument('--useragent', type=str, help="HTTP User-Agent to present when opening connections")
+parser.add_argument('--useragent', type=str, help="HTTP User-Agent to present when opening connections",
+                    default="Collector/0.1.2")
+parser.add_argument('--discover', action="store_true", help="Automatically try to listen to new instances")
 parser.add_argument('--debug', action="store_true", help="Enable verbose output useful for debugging")
+parser.add_argument('--nostatus', action="store_true", help="Don't show status screen. May save RAM.")
 
 
 class mpyStreamListener(streaming.StreamListener):
@@ -62,12 +64,29 @@ class mpyStreamListener(streaming.StreamListener):
             unsent_statuses[extract.url] = extract
             dedupe[s['url']] = time()
 
+            if args.discover:
+                domain = extract.url.split('/')[0]
+                if domain not in discoveredDomains:
+                    discoveredDomains[domain] = 0
+
         else:
             # Skip status, update last seen time
             dedupe[s['url']] = time()
 
     def handle_heartbeat(self):
         self.state[3] = time()
+
+
+class mpyStreamTester(streaming.StreamListener):
+    def __init__(self):
+        self.gotStatus = False
+        self.gotHeartbeat = False
+
+    def on_update(self, status):
+        self.gotStatus = True
+
+    def on_heartbeat(self):
+        self.gotHeartbeat = True
 
 
 async def flushtodb():
@@ -83,54 +102,104 @@ async def flushtodb():
     print("Flushed %i statuses, took %s seconds." % (len(sqlitevalues), str(time() - begints)))
 
 
-async def mpyWebsocketWorker(id, domain, testing=False):
-    mpyClient = Mastodon(api_base_url=domain)
-    healthy = await asyncio.to_thread(mpyClient.stream_healthy)
-    if not healthy:
-        print("[!] [%s] Streaming API is down! Exiting." % domain)
-        return False
-    if testing or args.debug:
-        print("[+] [%s] Streaming API is healthy." % domain)
-        if testing:
-            return True
+def mpyStreamingWorker(wid, domain):
+    mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent)
+    mpyClient.stream_public(mpyStreamListener(workers[wid]), run_async=True, reconnect_async=True)
 
-    mpyClient.stream_public(mpyStreamListener(workers[id]), run_async=True, reconnect_async=True)
+
+async def spawnCollectorWorker(domain):
+    try:
+        wid = max(workers.keys()) + 1
+    except ValueError:
+        wid = 0
+    workers[wid] = [asyncio.to_thread(mpyStreamingWorker, wid, domain), domain, 0, 0, 0, 0]
+    await workers[wid][0]
+
+
+async def mpyTestDomain(domain, timeout=15):
+    mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent, request_timeout=5)
+    try:
+        healthy = await asyncio.to_thread(mpyClient.stream_healthy)
+    except MastodonError:
+        return False
+
+    if not healthy:
+        if args.debug:
+            print("[!] [%s] Streaming API is down! Giving up." % domain)
+        return False
+
+    if args.debug:
+        print("[+] [%s] Streaming API is healthy." % domain)
+
+    try:
+        testListener = mpyStreamTester()
+        testWorker = mpyClient.stream_public(testListener, run_async=True)
+    except MastodonError:
+        return False
+
+    waited = 0
+    while waited < timeout:
+        if testListener.gotHeartbeat or testListener.gotStatus:
+            testWorker.close()
+            return True
+        await asyncio.sleep(.5)
+        waited += .5
+
+    testWorker.close()
+    return False
+
+
+async def discoverDomain(domain):
+    res = await mpyTestDomain(domain)
+    if res:
+        if args.debug:
+            print("[+] [%s] Passed testing, now listening." % domain)
+        discoveredDomains[domain] = 2
+        await spawnCollectorWorker(domain)
+    else:
+        discoveredDomains[domain] = -2
 
 
 async def collectorLoop(domains):
     global workers
 
     print("Starting workers for %i domains..." % len(domains))
-    id = 0
     for domain in domains:
-        workers[id] = [asyncio.create_task(mpyWebsocketWorker(id, domain)), domain, 0, 0, 0, 0]
-        id += 1
+        await spawnCollectorWorker(domain)
 
-    c = Console()
+    if not args.nostatus:
+        c = Console()
     lastflush = time()
     while True:
-        await asyncio.sleep(5)
+        if not args.nostatus:
+            c.clear()
+            statusScreen(c)
 
-        c.clear()
-        statusScreen(c)
         if lastflush + 120 < time():
             if len(unsent_statuses):
                 if args.debug:
                     print("Flushing statuses to disk...")
                 await flushtodb()
-                if args.debug:
-                    print("Pruning dedupe cache...")
-                ts = int(time())
-                delqueue = []
-                for k, v in dedupe.items():
-                    if v + 600 < ts:
-                        # I'd delete them here, but you can't do that while iterating over the dict.
-                        delqueue.append(k)
-
-                for i in delqueue:
-                    del dedupe[i]
-
             lastflush = time()
+
+            if args.debug:
+                print("Pruning dedupe cache...")
+            ts = int(time())
+            for i in [k for k, v in dedupe.items() if v + 600 < ts]:
+                del dedupe[i]
+
+        if args.discover:
+            maxkickoffs = 5
+            kickoffs = 0
+            undiscovered = [k for k, v in discoveredDomains.items() if v == 0]
+            for domain in undiscovered:
+                discoveredDomains[domain] = -1
+                asyncio.create_task(discoverDomain(domain))
+                kickoffs += 1
+                if kickoffs >= maxkickoffs:
+                    break
+
+        await asyncio.sleep(5)
 
 
 def buildDomainList(args):
@@ -142,16 +211,20 @@ def buildDomainList(args):
 
 
 async def testDomains(domains):
-    workers = [(i, asyncio.create_task(mpyWebsocketWorker(i, testing=True))) for i in domains]
+    workers = [(i, asyncio.create_task(mpyTestDomain(i))) for i in domains]
     await asyncio.gather(*[i[1] for i in workers])
 
-    table = Table()
-    table.add_column("Domain")
-    table.add_column("Streaming Ready")
-    for i in workers:
-        table.add_row(i[0], str(i[1].result()))
-    c = Console()
-    c.print(table)
+    if args.nostatus:
+        for i in workers:
+            print("%s: %s" % (i[0], {True: "PASS", False: "FAIL"}[i[1]]))
+    else:
+        c = Console()
+        table = Table()
+        table.add_column("Domain")
+        table.add_column("Streaming Ready")
+        for i in workers:
+            table.add_row(i[0], str(i[1].result()))
+        c.print(table)
 
 
 def statusScreen(c):
@@ -179,6 +252,10 @@ def statusScreen(c):
 if __name__ == '__main__':
     args = parser.parse_args()
 
+    if not args.nostatus:
+        from rich.console import Console
+        from rich.table import Table
+
     domains = buildDomainList(args)
     if args.mode == "run":
         db.checkdb(args.db)
@@ -187,7 +264,9 @@ if __name__ == '__main__':
         workers = {}
         unsent_statuses = {}
         dedupe = {}
+        discoveredDomains = {i:1 for i in domains}
 
+        import cProfile
         asyncio.run(collectorLoop(domains))
 
     elif args.mode == "test":
