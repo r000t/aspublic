@@ -5,6 +5,7 @@ decorator
 attrs
 html2text
 aiosqlite
+websockets
 rich
 
 #Only needed for using the Viewer

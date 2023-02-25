@@ -1,5 +1,6 @@
 import attrs
 from attrs import define, asdict
+from time import time
 
 
 @define(slots=True)
@@ -15,3 +16,14 @@ class minimalStatus:
 
     def getdict(self):
         return asdict(self)
+
+
+@define(slots=True)
+class listenerStats:
+    domain: str
+    lastStatusTimestamp: int = 0
+    lastHeartbeatTimestamp: int = 0
+    receivedStatusCount: int = 0
+    uniqueStatusCount: int = 0
+    startedTimestamp: int = time()
+
