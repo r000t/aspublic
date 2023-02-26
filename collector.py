@@ -162,7 +162,6 @@ class nativeWebsocketsListener():
         self.htmlparser.body_width = 0
 
     async def listen(self):
-        print(1)
         while True:
             # Websockets documentation says that .connect(), when used like "async for ws in websockets.connect()"
             # will raise exceptions, allowing you to decide which get retried and which raise further. __aiter__ in
@@ -182,16 +181,10 @@ class nativeWebsocketsListener():
                                      self.stats,
                                      self.htmlparser)
 
-            except KeyboardInterrupt:
-                raise
-
-            except Exception as e:
-                print("fuckballs %s" % e)
-                raise
-
-            finally:
-                self.stats.status = -2
-
+            except websockets.ConnectionClosed:
+                self.stats.status = -1
+                await asyncio.sleep(5)
+                continue
 
 
 class mpyStreamListener(streaming.StreamListener):
@@ -202,7 +195,6 @@ class mpyStreamListener(streaming.StreamListener):
         self.htmlparser = HTML2Text()
         self.htmlparser.ignore_links = True
         self.htmlparser.body_width = 0
-
 
     def on_update(self, s):
 
@@ -244,7 +236,7 @@ async def flushtodb():
     await db.batchwrite(sqlitevalues, args.db)
     for i in sqlitevalues:
         unsent_statuses.pop(i[0])
-    print("Flushed %i statuses, took %s seconds." % (len(sqlitevalues), str(time() - begints)))
+    print("Flushed %i statuses, took %i ms." % (len(sqlitevalues), int((time() - begints) * 1000)))
 
 
 async def domainWorker(domain, stats):
@@ -257,7 +249,8 @@ async def domainWorker(domain, stats):
 
         except aiohttp.ClientConnectorError:
             # Assume temporary DNS problem, retry
-            print("Retrying initial health check...")
+            if args.debug:
+                print("Retrying initial health check...")
             await asyncio.sleep(0.1)
             continue
 
@@ -265,7 +258,11 @@ async def domainWorker(domain, stats):
     try:
         await listener.listen()
     except websockets.InvalidStatusCode:
-        print("[!] [%s] Refused websockets connection." % domain)
+        if args.debug:
+            print("[!] [%s] Refused websockets connection." % domain)
+    except websockets.InvalidURI:
+        if args.debug:
+            print("[!] [%s] Redirected, but we didn't capture it properly." % domain)
     finally:
         stats.status = -2
 
@@ -335,13 +332,13 @@ async def discoverDomain(domain):
 
 
 async def collectorLoop(domains):
-    global workers
     global httpsession
     global shutdownEvent
     httpsession = aiohttp.ClientSession()
     shutdownEvent = asyncio.Event()
 
-    print("Starting workers for %i domains..." % len(domains))
+    if args.debug:
+        print("Starting workers for %i domains..." % len(domains))
     for domain in domains:
         await spawnCollectorWorker(domain)
 
@@ -381,10 +378,11 @@ async def collectorLoop(domains):
             await asyncio.sleep(5)
 
         except asyncio.CancelledError:
-            print("Shutting down collector loop")
+            print("\nShutting down collector loop...")
             shutdownEvent.set()
             await httpsession.close()
-
+            await flushtodb()
+            raise
 
 
 def buildDomainList(args):
@@ -460,7 +458,11 @@ if __name__ == '__main__':
         dedupe = {}
         discoveredDomains = {i:1 for i in domains}
 
-        asyncio.run(collectorLoop(domains))
+        try:
+            asyncio.run(collectorLoop(domains))
+        except KeyboardInterrupt:
+            # Exit a bit more cleanly.
+            exit()
 
     elif args.mode == "test":
         asyncio.run(testDomains(domains))
