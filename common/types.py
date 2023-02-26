@@ -21,6 +21,8 @@ class minimalStatus:
 @define(slots=True)
 class listenerStats:
     domain: str
+    method: str = "..."
+    status: int = 0
     lastStatusTimestamp: int = 0
     lastHeartbeatTimestamp: int = 0
     receivedStatusCount: int = 0

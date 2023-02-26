@@ -1,6 +1,7 @@
 #!/usr/bin/python
-import asyncio
 import argparse
+import asyncio
+import aiohttp
 import websockets
 import json
 import dateutil
@@ -151,34 +152,57 @@ class nativeWebsocketsListener():
         json_object = nativeWebsocketsListener.__json_allow_dict_attrs(json_object)
         return json_object
 
-    def __init__(self, endpoint, stats):
+    def __init__(self, endpoint, stats: listenerStats):
         self.endpoint = endpoint
         self.stats = stats
+        self.stats.method = "Websockets"
+        self.stats.status = 1
         self.htmlparser = HTML2Text()
         self.htmlparser.ignore_links = True
         self.htmlparser.body_width = 0
 
     async def listen(self):
-        async with websockets.connect(self.endpoint) as ws:
+        print(1)
+        while True:
+            # Websockets documentation says that .connect(), when used like "async for ws in websockets.connect()"
+            # will raise exceptions, allowing you to decide which get retried and which raise further. __aiter__ in
+            # Connect() in websockets/client.py says that it does not; It only raises on asyncio.CancelledError. The
+            # catchall except block never has any opportunity to raise.
+            # This means that every exception other than CancelledError will retry forever.
+            try:
+                async with websockets.connect(self.endpoint) as ws:
+                    await ws.send('{ "type": "subscribe", "stream": "public"}')
+                    self.stats.status = 2
+                    async for message in ws:
+                        envelope = json.loads(message)
+                        if envelope["event"] != "update":
+                            continue
 
-            await ws.send('{ "type": "subscribe", "stream": "public"}')
-            async for message in ws:
-                envelope = json.loads(message)
-                if envelope["event"] != "update":
-                    continue
+                        importStatus(json.loads(envelope["payload"], object_hook=nativeWebsocketsListener.__json_hooks),
+                                     self.stats,
+                                     self.htmlparser)
 
-                importStatus(json.loads(envelope["payload"], object_hook=nativeWebsocketsListener.__json_hooks),
-                             self.stats,
-                             self.htmlparser)
+            except KeyboardInterrupt:
+                raise
+
+            except Exception as e:
+                print("fuckballs %s" % e)
+                raise
+
+            finally:
+                self.stats.status = -2
+
 
 
 class mpyStreamListener(streaming.StreamListener):
     def __init__(self, stats: listenerStats):
         self.stats = stats
-
+        self.stats.method = "mastodon.py"
+        self.stats.status = 1
         self.htmlparser = HTML2Text()
         self.htmlparser.ignore_links = True
         self.htmlparser.body_width = 0
+
 
     def on_update(self, s):
 
@@ -189,7 +213,13 @@ class mpyStreamListener(streaming.StreamListener):
         importStatus(s, self.stats, self.htmlparser)
 
     def handle_heartbeat(self):
+        self.stats.status = 2
         self.stats.lastHeartbeatTimestamp = time()
+
+    def on_abort(self, err):
+        print("mpy caught error")
+        print(err)
+        self.stats.status = -2
 
 
 class mpyStreamTester(streaming.StreamListener):
@@ -217,14 +247,38 @@ async def flushtodb():
     print("Flushed %i statuses, took %s seconds." % (len(sqlitevalues), str(time() - begints)))
 
 
-async def nativeWebsocketsWorker(domain, stats):
-    listener = nativeWebsocketsListener("wss://%s/api/v1/streaming" % domain, stats)
-    listenerTask = await asyncio.create_task(listener.listen())
+async def domainWorker(domain, stats):
+    while True:
+        try:
+            async with httpsession.get('https://%s/api/v1/streaming/health' % domain) as resp:
+                # Check if Streaming API is up, and also get redirected if needed.
+                streamingBase = ''.join((resp.url.host, resp.url.path)).rstrip('/health')
+                break
 
+        except aiohttp.ClientConnectorError:
+            # Assume temporary DNS problem, retry
+            print("Retrying initial health check...")
+            await asyncio.sleep(0.1)
+            continue
 
-def mpyStreamingWorker(domain, stats):
+    listener = nativeWebsocketsListener("wss://%s" % streamingBase, stats)
+    try:
+        await listener.listen()
+    except websockets.InvalidStatusCode:
+        print("[!] [%s] Refused websockets connection." % domain)
+    finally:
+        stats.status = -2
+
+    # Fallback to mastodon.py
     mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent)
-    mpyClient.stream_public(mpyStreamListener(stats), run_async=True, reconnect_async=True)
+    streamingHandler = mpyClient.stream_public(mpyStreamListener(stats), run_async=True, reconnect_async=True)
+
+    try:
+        await shutdownEvent.wait()
+        stats.status = -2
+    except asyncio.CancelledError:
+        streamingHandler.close()
+        raise
 
 
 async def spawnCollectorWorker(domain):
@@ -233,8 +287,7 @@ async def spawnCollectorWorker(domain):
     except ValueError:
         wid = 0
     stats = listenerStats(domain=domain)
-    workers[wid] = (asyncio.create_task(nativeWebsocketsWorker(domain, stats)), stats)
-    #await workers[wid][0]
+    workers[wid] = (asyncio.create_task(domainWorker(domain, stats)), stats)
 
 
 async def mpyTestDomain(domain, timeout=15):
@@ -283,45 +336,55 @@ async def discoverDomain(domain):
 
 async def collectorLoop(domains):
     global workers
+    global httpsession
+    global shutdownEvent
+    httpsession = aiohttp.ClientSession()
+    shutdownEvent = asyncio.Event()
 
     print("Starting workers for %i domains..." % len(domains))
     for domain in domains:
         await spawnCollectorWorker(domain)
-    print("Done.")
 
     if not args.nostatus:
         c = Console()
     lastflush = time()
     while True:
-        if not args.nostatus:
-            c.clear()
-            statusScreen(c)
+        try:
+            if not args.nostatus:
+                c.clear()
+                statusScreen(c)
 
-        if lastflush + 120 < time():
-            if len(unsent_statuses):
+            if lastflush + 120 < time():
+                if len(unsent_statuses):
+                    if args.debug:
+                        print("Flushing statuses to disk...")
+                    await flushtodb()
+                lastflush = time()
+
                 if args.debug:
-                    print("Flushing statuses to disk...")
-                await flushtodb()
-            lastflush = time()
+                    print("Pruning dedupe cache...")
+                ts = int(time())
+                for i in [k for k, v in dedupe.items() if v + 600 < ts]:
+                    del dedupe[i]
 
-            if args.debug:
-                print("Pruning dedupe cache...")
-            ts = int(time())
-            for i in [k for k, v in dedupe.items() if v + 600 < ts]:
-                del dedupe[i]
+            if args.discover:
+                maxkickoffs = 5
+                kickoffs = 0
+                undiscovered = [k for k, v in discoveredDomains.items() if v == 0]
+                for domain in undiscovered:
+                    discoveredDomains[domain] = -1
+                    asyncio.create_task(discoverDomain(domain))
+                    kickoffs += 1
+                    if kickoffs >= maxkickoffs:
+                        break
 
-        if args.discover:
-            maxkickoffs = 5
-            kickoffs = 0
-            undiscovered = [k for k, v in discoveredDomains.items() if v == 0]
-            for domain in undiscovered:
-                discoveredDomains[domain] = -1
-                asyncio.create_task(discoverDomain(domain))
-                kickoffs += 1
-                if kickoffs >= maxkickoffs:
-                    break
+            await asyncio.sleep(5)
 
-        await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            print("Shutting down collector loop")
+            shutdownEvent.set()
+            await httpsession.close()
+
 
 
 def buildDomainList(args):
@@ -351,19 +414,27 @@ async def testDomains(domains):
 
 def statusScreen(c):
     t = Table()
-    t.add_column("Worker")
+    t.add_column("ID")
     t.add_column("Domain")
+    t.add_column("Status")
+    t.add_column("Method")
     t.add_column("Last Status")
-    t.add_column("Last Heartbeat")
     t.add_column("Statuses")
     t.add_column("Unique")
+
+    statusMap = {0: "INIT",
+                 1: "SETUP",
+                 2: "ACTIVE",
+                 -1: "RETRY",
+                 -2: "FAILED"}
 
     for k,v in workers.items():
         stats: listenerStats = v[1]
         t.add_row(str(k),
                   stats.domain,
+                  statusMap[stats.status],
+                  stats.method,
                   datetime.fromtimestamp(stats.lastStatusTimestamp).strftime("%H:%M:%S"),
-                  datetime.fromtimestamp(stats.lastHeartbeatTimestamp).strftime("%H:%M:%S"),
                   str(stats.receivedStatusCount), str(stats.uniqueStatusCount))
 
     c.print("as:Public Standalone Collector")
