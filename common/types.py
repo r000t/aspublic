@@ -30,5 +30,6 @@ class listenerStats:
     lastRetryTimestamp: int = defaultZeroIntField
     receivedStatusCount: int = 0
     uniqueStatusCount: int = 0
+    rejectedStatusCount: int = 0
 
 

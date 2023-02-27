@@ -48,8 +48,10 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
     # such as filling up the dedupe cache.
     for i in excluded_domains:
         if domain.endswith(i):
-            print("Rejected status %s (Matched excluded domain %s)" % (s['url'], i))
-            return
+            if args.debug:
+                print("Rejected status %s (Matched excluded domain %s)" % (s['url'], i))
+            stats.rejectedStatusCount += 1
+            return False
 
     if s['url'] not in dedupe:
         stats.uniqueStatusCount += 1
@@ -57,7 +59,10 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
         parsedText = htmlparser.handle(s['content']).strip()
         if excluded_regex_compiled:
             if excluded_regex_compiled.search(parsedText):
-                print("Rejected status %s (Matched excluded regex)" % s['url'])
+                if args.debug:
+                    print("Rejected status %s (Matched excluded regex)" % s['url'])
+                stats.rejectedStatusCount += 1
+                return False
 
         # This literally seemed to change on a dime after a week of working fine. Adding check.
         if type(s['created_at']) is datetime:
@@ -84,11 +89,13 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
         if args.discover:
             domain = extract.url.split('/')[0]
             if domain not in discoveredDomains:
-                discoveredDomains[domain] = 0
+                if domain not in excluded_domains:
+                    discoveredDomains[domain] = 0
 
     else:
         # Skip status, update last seen time
         dedupe[s['url']] = time()
+        return False
 
 
 class AttribAccessDict(dict):
@@ -265,20 +272,15 @@ async def flushtodb():
     print("Flushed %i statuses, took %i ms." % (len(sqlitevalues), int((time() - begints) * 1000)))
 
 
-async def domainWorker(domain, stats):
-    while True:
-        try:
-            async with httpsession.get('https://%s/api/v1/streaming/health' % domain) as resp:
-                # Check if Streaming API is up, and also get redirected if needed.
-                streamingBase = ''.join((resp.url.host, resp.url.path)).rstrip('/health')
-                break
+def mkmpy(domain):
+    mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent)
+    return mpyClient
 
-        except aiohttp.ClientConnectorError:
-            # Assume temporary DNS problem, retry
-            if args.debug:
-                print("Retrying initial health check...")
-            await asyncio.sleep(0.1)
-            continue
+async def domainWorker(domain, stats):
+    result, streamingBase = await nativeTestDomain(domain, retries=5)
+    if not result:
+        print("[!] [%s] Failed self-testing. Not connecting." % domain)
+        return False
 
     listener = nativeWebsocketsListener("wss://%s" % streamingBase, stats)
     try:
@@ -296,8 +298,13 @@ async def domainWorker(domain, stats):
         stats.status = -2
 
     # Fallback to mastodon.py
-    mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent)
-    streamingHandler = mpyClient.stream_public(mpyStreamListener(stats), run_async=True, reconnect_async=True)
+    try:
+        setupThread = asyncio.to_thread(mkmpy, domain)
+        mpyClient = await setupThread
+        streamingHandler = mpyClient.stream_public(mpyStreamListener(stats), run_async=True, reconnect_async=True)
+    except:
+        stats.status = -2
+        return False
 
     try:
         await shutdownEvent.wait()
@@ -349,9 +356,31 @@ async def mpyTestDomain(domain, timeout=15):
     return False
 
 
+async def nativeTestDomain(domain, retries=0):
+    while True:
+        try:
+            async with httpsession.get('https://%s/api/v1/streaming/public' % domain) as resp:
+                if resp.status >= 400:
+                    return False, None
+
+                # Check if Streaming API is up, and also get redirected if needed.
+                streamingBase = ''.join((resp.url.host, resp.url.path)).rstrip('/public')
+                return True, streamingBase
+
+        except aiohttp.ClientConnectorError:
+            if retries:
+                # Assume temporary DNS problem, retry
+                if args.debug:
+                    print("Retrying health check...")
+                await asyncio.sleep(0.1)
+                retries -= 1
+                continue
+            return False, None
+
+
 async def discoverDomain(domain):
-    res = await mpyTestDomain(domain)
-    if res:
+    res = await nativeTestDomain(domain)
+    if res[0]:
         if args.debug:
             print("[+] [%s] Passed testing, now listening." % domain)
         discoveredDomains[domain] = 2
@@ -394,7 +423,7 @@ async def collectorLoop(domains):
                     del dedupe[i]
 
             if args.discover:
-                maxkickoffs = 5
+                maxkickoffs = 10
                 kickoffs = 0
                 undiscovered = [k for k, v in discoveredDomains.items() if v == 0]
                 for domain in undiscovered:
@@ -433,8 +462,10 @@ def buildListFromArgs(direct, lists, nocsv=False):
 
 
 async def testDomains(domains):
-    workers = [(i, asyncio.create_task(mpyTestDomain(i))) for i in domains]
-    await asyncio.gather(*[i[1] for i in workers])
+    global httpsession
+    async with aiohttp.ClientSession() as httpsession:
+        workers = [(i, asyncio.create_task(nativeTestDomain(i))) for i in domains]
+        await asyncio.gather(*[i[1] for i in workers])
 
     if args.nostatus:
         for i in workers:
@@ -458,6 +489,7 @@ def statusScreen(c):
     t.add_column("Last Status")
     t.add_column("Statuses")
     t.add_column("Unique")
+    t.add_column("Rejected")
 
     statusMap = {0: "INIT",
                  1: "SETUP",
@@ -472,7 +504,7 @@ def statusScreen(c):
                   statusMap[stats.status],
                   stats.method,
                   datetime.fromtimestamp(stats.lastStatusTimestamp).strftime("%H:%M:%S"),
-                  str(stats.receivedStatusCount), str(stats.uniqueStatusCount))
+                  str(stats.receivedStatusCount), str(stats.uniqueStatusCount), str(stats.rejectedStatusCount))
 
     c.print("as:Public Standalone Collector")
     c.print(t)
@@ -494,6 +526,7 @@ if __name__ == '__main__':
         excluded_regex_compiled = re.compile('|'.join(["(%s)" % i for i in excluded_regex]))
     else:
         excluded_regex_compiled = False
+
     if args.mode == "run":
         db.checkdb(args.db)
 
