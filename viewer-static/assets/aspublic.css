@@ -32,10 +32,15 @@ input.home-searchbox {
   font-size:16pt;
 }
 
+input.home-domainbox {
+  height:40px;
+  font-size:16pt;
+}
+
 select.home-selector {
   width: fit-content;
   height:50px;
-  font-size:16pt;
+  font-size:14pt;
 }
 
 div.results-container {

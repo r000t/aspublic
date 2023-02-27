@@ -1,9 +1,11 @@
 import sqlite3
 import aiosqlite
+from re import compile
 from datetime import datetime, date
 from .types import minimalStatus
 
 default_dbpath = "statuses.sqlite3"
+validDomain = compile("^(((?!\-))(xn\-\-)?[a-z0-9\-_]{0,61}[a-z0-9]{1,1}\.)*(xn\-\-)?([a-z0-9\-]{1,61}|[a-z0-9\-]{1,30})\.[a-z]{2,}$")
 
 def checkdb(dbpath=default_dbpath):
     from os import path
@@ -47,7 +49,15 @@ async def batchwrite(values: list, dbpath):
         await db.commit()
 
 
-async def search(dbpath, q: str, bots: bool = None, replies: bool = None, attachments: bool = None, limit: int = 50, before: datetime = None, after: datetime = None):
+async def search(dbpath,
+                 q: str,
+                 domain: str = None,
+                 bots: bool = None,
+                 replies: bool = None,
+                 attachments: bool = None,
+                 limit: int = 50,
+                 before: datetime = None,
+                 after: datetime = None):
     async with aiosqlite.connect(dbpath) as db:
         optionmap = ((bots, 'bot'),
                      (replies, 'reply'),
@@ -84,11 +94,22 @@ async def search(dbpath, q: str, bots: bool = None, replies: bool = None, attach
 
             options += ' created > %s AND' % after.timestamp()
 
+        if domain:
+            domain = domain.strip().lstrip("https://").strip("/").lower()
+            # Less bulletproof anti-skid checks than before, and rn FastAPI is doing *no* validation.
+            if not validDomain.match(domain):
+                raise "No."
+
+            for i in ['/', ';', " ", "%", "&"]:
+                if i in domain:
+                    raise "No."
+
+            options += (' url LIKE "%s%%/%%" AND' % domain)
+
         # As a reminder to anybody reading this code...
         # PUTTING VARIABLES INTO A SQL QUERY WITHOUT USING PARAMETERIZATION (the ?s) IS AMAZINGLY, SPECTACULARLY, UNIMAGINABLY DANGEROUS.
         # Don't use this as an example for your own code. I'm a professional, and I know what I'm doing. Now, hold my joint.
         sqlitequery = 'SELECT * FROM statuses t JOIN fts_status f ON t.ROWID = f.ROWID WHERE %s fts_status MATCH ? ORDER BY created DESC LIMIT %i;' % (options, int(limit))
-
         results = []
         async with db.execute(sqlitequery, ('"%s"' % q,)) as cursor:
             async for row in cursor:

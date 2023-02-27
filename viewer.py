@@ -1,20 +1,19 @@
 import asyncio
 from typing import List, Optional, Union
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, AnyUrl
 from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 from time import time
 from datetime import datetime, date
 from common import db
-app = FastAPI(title="as:Public", version="0.1.2")
+app = FastAPI(title="as:Public", version="0.1.3")
 
 ## Path to status database from a Collector
 #dbpath = 'statuses.sqlite3'
 dbpath = db.default_dbpath
 
-## Uncomment this line to serve static files from the application. You'll need to do that to run it locally.
-#app.mount("/", StaticFiles(directory="viewer-static", html=True), name="frontend")
-
+## Set to True to serve static files from the application. You'll need to do that to run it locally.
+mountLocalDirectory = True
 
 class StatusModel(BaseModel):
     url: HttpUrl = Field("http://example.com/@user/1001", description="URL the status is located at, on its originating server")
@@ -38,6 +37,7 @@ class ResultModel(BaseModel):
 
 @app.get("/api/unstable/search", response_model=ResultModel)
 async def read_item(q: str = Query(title="Single search term to look for in status text/body"),
+                    domain: str = Query(default=None, title="Return only results from this domain"),
                     bots: bool = None,
                     replies: bool = None,
                     attachments: bool = None,
@@ -50,6 +50,7 @@ async def read_item(q: str = Query(title="Single search term to look for in stat
     begints = time()
     results = await db.search(db.default_dbpath,
                               q=q,
+                              domain=domain,
                               bots=bots,
                               replies=replies,
                               attachments=attachments,
@@ -58,3 +59,6 @@ async def read_item(q: str = Query(title="Single search term to look for in stat
                               after=after)
 
     return {"results": results, "debug": {"dbtime_ms": int(((time() - begints) * 1000))}}
+
+if mountLocalDirectory:
+    app.mount("/", StaticFiles(directory="viewer-static", html=True), name="frontend")

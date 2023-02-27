@@ -4,6 +4,7 @@ import asyncio
 import aiohttp
 import websockets
 import json
+import re
 import dateutil
 from time import time
 from datetime import datetime, timezone
@@ -20,8 +21,16 @@ parser.add_argument('-s', '--server', action='append', default=[],
                     help="Connect to this server. You can call this multiple times.")
 parser.add_argument('-l', '--list', action='append', default=[],
                     help="Read servers from this list. It can be a CSV if the first field is the domain.")
+parser.add_argument("--exclude", action='append', default=[],
+                    help="Do not connect to or process statuses from this server. You can call this multiple times.")
+parser.add_argument("--exclude-list", action='append', default=[],
+                    help="Read servers to ignore from this list. It can be a CSV if the first field is the domain")
+parser.add_argument("--exclude-regex", action='append', default=[],
+                    help="Drop statuses mathing this regular expression. You can call this multiple times.")
+parser.add_argument("--exclude-regex-list", action='append', default=[],
+                    help="Read regular expressions to drop from this list.")
 parser.add_argument('--useragent', type=str, help="HTTP User-Agent to present when opening connections",
-                    default="Collector/0.1.2")
+                    default="Collector/0.1.3")
 parser.add_argument('--discover', action="store_true", help="Automatically try to listen to new instances")
 parser.add_argument('--debug', action="store_true", help="Enable verbose output useful for debugging")
 parser.add_argument('--nostatus', action="store_true", help="Don't show status screen. May save RAM.")
@@ -30,8 +39,25 @@ parser.add_argument('--nostatus', action="store_true", help="Don't show status s
 def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
     stats.lastStatusTimestamp = time()
     stats.receivedStatusCount += 1
+
+    url = s['url'].split('://')[1]
+    domain = url.split('/')[0]
+
+    # This is here and not past the dedupe check because (I'm guessing) it's less CPU heavy to do some string
+    # checks than checking for dict membership. This also prevents excluded domains from doing certain things,
+    # such as filling up the dedupe cache.
+    for i in excluded_domains:
+        if domain.endswith(i):
+            print("Rejected status %s (Matched excluded domain %s)" % (s['url'], i))
+            return
+
     if s['url'] not in dedupe:
         stats.uniqueStatusCount += 1
+
+        parsedText = htmlparser.handle(s['content']).strip()
+        if excluded_regex_compiled:
+            if excluded_regex_compiled.search(parsedText):
+                print("Rejected status %s (Matched excluded regex)" % s['url'])
 
         # This literally seemed to change on a dime after a week of working fine. Adding check.
         if type(s['created_at']) is datetime:
@@ -43,8 +69,8 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
             print("Fixing naive datetime...")
             dt.replace(tzinfo=timezone.utc)
 
-        extract = minimalStatus(url=s['url'].split('://')[1],
-                                text=htmlparser.handle(s['content']).strip(),
+        extract = minimalStatus(url=url,
+                                text=parsedText,
                                 subject=s['spoiler_text'],
                                 created=int(dt.timestamp()),
                                 language=s['language'],
@@ -169,7 +195,7 @@ class nativeWebsocketsListener():
             # catchall except block never has any opportunity to raise.
             # This means that every exception other than CancelledError will retry forever.
             try:
-                async with websockets.connect(self.endpoint) as ws:
+                async with websockets.connect(self.endpoint, user_agent_header=args.useragent) as ws:
                     await ws.send('{ "type": "subscribe", "stream": "public"}')
                     self.stats.status = 2
                     async for message in ws:
@@ -181,7 +207,7 @@ class nativeWebsocketsListener():
                                      self.stats,
                                      self.htmlparser)
 
-            except websockets.ConnectionClosed:
+            except websockets.ConnectionClosedError:
                 self.stats.status = -1
                 await asyncio.sleep(5)
                 continue
@@ -263,6 +289,9 @@ async def domainWorker(domain, stats):
     except websockets.InvalidURI:
         if args.debug:
             print("[!] [%s] Redirected, but we didn't capture it properly." % domain)
+    except Exception as e:
+        print("[!] [%s] Unhandled exception in websockets. Falling back." % domain)
+
     finally:
         stats.status = -2
 
@@ -393,6 +422,16 @@ def buildDomainList(args):
     return list(domains)
 
 
+def buildListFromArgs(direct, lists, nocsv=False):
+    items = set([i for i in direct])
+    for file in lists:
+        if nocsv:
+            items.update([i.strip() for i in open(file).readlines()])
+        else:
+            items.update([i.strip().split(',')[0] for i in open(file).readlines()])
+    return list(items)
+
+
 async def testDomains(domains):
     workers = [(i, asyncio.create_task(mpyTestDomain(i))) for i in domains]
     await asyncio.gather(*[i[1] for i in workers])
@@ -448,7 +487,13 @@ if __name__ == '__main__':
         from rich.console import Console
         from rich.table import Table
 
-    domains = buildDomainList(args)
+    domains = buildListFromArgs(args.server, args.list)
+    excluded_domains = buildListFromArgs(args.exclude, args.exclude_list)
+    excluded_regex = buildListFromArgs(args.exclude_regex, args.exclude_regex_list, nocsv=True)
+    if len(excluded_regex):
+        excluded_regex_compiled = re.compile('|'.join(["(%s)" % i for i in excluded_regex]))
+    else:
+        excluded_regex_compiled = False
     if args.mode == "run":
         db.checkdb(args.db)
 

@@ -1,7 +1,9 @@
+import attr.setters
 import attrs
-from attrs import define, asdict
+from attrs import define, asdict, field
 from time import time
 
+defaultZeroIntField = field(default=0, converter=int, on_setattr=attr.setters.convert)
 
 @define(slots=True)
 class minimalStatus:
@@ -23,9 +25,10 @@ class listenerStats:
     domain: str
     method: str = "..."
     status: int = 0
-    lastStatusTimestamp: int = 0
-    lastHeartbeatTimestamp: int = 0
+    lastStatusTimestamp: int = defaultZeroIntField
+    lastHeartbeatTimestamp: int = defaultZeroIntField
+    lastRetryTimestamp: int = defaultZeroIntField
     receivedStatusCount: int = 0
     uniqueStatusCount: int = 0
-    startedTimestamp: int = time()
+
 
