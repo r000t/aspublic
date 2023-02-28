@@ -13,7 +13,9 @@ app = FastAPI(title="as:Public", version="0.1.3")
 dbpath = db.default_dbpath
 
 ## Set to True to serve static files from the application. You'll need to do that to run it locally.
-mountLocalDirectory = True
+## If you're running this even semi-publicly, see the README for a sample nginx configuration.
+mountLocalDirectory = False
+
 
 class StatusModel(BaseModel):
     url: HttpUrl = Field("http://example.com/@user/1001", description="URL the status is located at, on its originating server")

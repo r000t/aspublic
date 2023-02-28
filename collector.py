@@ -276,6 +276,7 @@ def mkmpy(domain):
     mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent)
     return mpyClient
 
+
 async def domainWorker(domain, stats):
     result, streamingBase = await nativeTestDomain(domain, retries=5)
     if not result:
