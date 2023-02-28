@@ -43,15 +43,10 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
 
     if s['reblog']:
         # Mastodo (sic) software appears to send boosts to the public stream.
-        importStatus(s['reblog'], stats, htmlparser)
+        return importStatus(s['reblog'], stats, htmlparser)
 
     stats.lastStatusTimestamp = time()
     stats.receivedStatusCount += 1
-
-    #print(s)
-    if s["reblog"]:
-        print("----reblog report----")
-        print("URL: %s\nURI: %s\ncontent: %s\nreblog of %s\nSCOPE: %s" % (s["url"], s["uri"], s["content"], s["reblog"]["url"], s["reblog"]["visibility"]))
 
     url = s['url'].split('://')[1]
     domain = url.split('/')[0]
@@ -304,6 +299,8 @@ async def domainWorker(domain, stats):
             print("[!] [%s] Redirected, but we didn't capture it properly." % domain)
     except Exception as e:
         print("[!] [%s] Unhandled exception in websockets. Falling back." % domain)
+        if args.debug:
+            print(repr(e))
 
     finally:
         stats.status = -2
