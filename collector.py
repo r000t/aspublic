@@ -331,39 +331,6 @@ async def spawnCollectorWorker(domain):
     workers[wid] = (asyncio.create_task(domainWorker(domain, stats)), stats)
 
 
-async def mpyTestDomain(domain, timeout=15):
-    mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent, request_timeout=5)
-    try:
-        healthy = await asyncio.to_thread(mpyClient.stream_healthy)
-    except MastodonError:
-        return False
-
-    if not healthy:
-        if args.debug:
-            print("[!] [%s] Streaming API is down! Giving up." % domain)
-        return False
-
-    if args.debug:
-        print("[+] [%s] Streaming API is healthy." % domain)
-
-    try:
-        testListener = mpyStreamTester()
-        testWorker = mpyClient.stream_public(testListener, run_async=True)
-    except MastodonError:
-        return False
-
-    waited = 0
-    while waited < timeout:
-        if testListener.gotHeartbeat or testListener.gotStatus:
-            testWorker.close()
-            return True
-        await asyncio.sleep(.5)
-        waited += .5
-
-    testWorker.close()
-    return False
-
-
 async def nativeTestDomain(domain, retries=0):
     while True:
         try:
