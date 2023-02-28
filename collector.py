@@ -37,8 +37,21 @@ parser.add_argument('--nostatus', action="store_true", help="Don't show status s
 
 
 def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
+    # This is the opt-out mechanism.
+    if s['visibility'] != 'public':
+        return False
+
+    if s['reblog']:
+        # Mastodo (sic) software appears to send boosts to the public stream.
+        importStatus(s['reblog'], stats, htmlparser)
+
     stats.lastStatusTimestamp = time()
     stats.receivedStatusCount += 1
+
+    #print(s)
+    if s["reblog"]:
+        print("----reblog report----")
+        print("URL: %s\nURI: %s\ncontent: %s\nreblog of %s\nSCOPE: %s" % (s["url"], s["uri"], s["content"], s["reblog"]["url"], s["reblog"]["visibility"]))
 
     url = s['url'].split('://')[1]
     domain = url.split('/')[0]
@@ -81,7 +94,7 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
                                 language=s['language'],
                                 bot=s['account']['bot'],
                                 reply=s['in_reply_to_id'] is not None,
-                                attachments=len(s['media_attachments']) is not 0)
+                                attachments=len(s['media_attachments']) != 0)
 
         unsent_statuses[extract.url] = extract
         dedupe[s['url']] = time()
@@ -202,7 +215,7 @@ class nativeWebsocketsListener():
             # catchall except block never has any opportunity to raise.
             # This means that every exception other than CancelledError will retry forever.
             try:
-                async with websockets.connect(self.endpoint, user_agent_header=args.useragent) as ws:
+                async with websockets.connect(self.endpoint, user_agent_header=args.useragent, open_timeout=5) as ws:
                     await ws.send('{ "type": "subscribe", "stream": "public"}')
                     self.stats.status = 2
                     async for message in ws:
@@ -214,7 +227,9 @@ class nativeWebsocketsListener():
                                      self.stats,
                                      self.htmlparser)
 
-            except websockets.ConnectionClosedError:
+            except websockets.ConnectionClosedError as e:
+                if args.debug:
+                    print("[!] [%s] Websockets closed: %s; Retrying." % (self.stats.domain, e))
                 self.stats.status = -1
                 await asyncio.sleep(5)
                 continue
@@ -230,11 +245,6 @@ class mpyStreamListener(streaming.StreamListener):
         self.htmlparser.body_width = 0
 
     def on_update(self, s):
-
-        # This is the opt-out mechanism.
-        if s['visibility'] != 'public':
-            return
-
         importStatus(s, self.stats, self.htmlparser)
 
     def handle_heartbeat(self):
@@ -360,7 +370,7 @@ async def mpyTestDomain(domain, timeout=15):
 async def nativeTestDomain(domain, retries=0):
     while True:
         try:
-            async with httpsession.get('https://%s/api/v1/streaming/public' % domain) as resp:
+            async with httpsession.get('https://%s/api/v1/streaming/public' % domain, timeout=5) as resp:
                 if resp.status >= 400:
                     return False, None
 
@@ -368,11 +378,15 @@ async def nativeTestDomain(domain, retries=0):
                 streamingBase = ''.join((resp.url.host, resp.url.path)).rstrip('/public')
                 return True, streamingBase
 
-        except aiohttp.ClientConnectorError:
+        except asyncio.TimeoutError:
+            if args.debug:
+                print("[!] [%s] Timed out during health check. Not connecting.")
+
+        except aiohttp.ClientConnectorError as e:
             if retries:
                 # Assume temporary DNS problem, retry
                 if args.debug:
-                    print("Retrying health check...")
+                    print("[i] [%s] native testing error: %s Retrying health check..." % (domain, e))
                 await asyncio.sleep(0.1)
                 retries -= 1
                 continue
@@ -393,7 +407,7 @@ async def discoverDomain(domain):
 async def collectorLoop(domains):
     global httpsession
     global shutdownEvent
-    httpsession = aiohttp.ClientSession()
+    httpsession = aiohttp.ClientSession(headers={'User-Agent': args.useragent})
     shutdownEvent = asyncio.Event()
 
     if args.debug:
