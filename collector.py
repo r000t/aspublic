@@ -6,14 +6,17 @@ import websockets
 import json
 import re
 import dateutil
-import logging
 from os import makedirs, path
 from time import time
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from html2text import HTML2Text
+from requests import session
+from python_socks.async_.asyncio import Proxy
+from python_socks._errors import ProxyError
+from aiohttp_socks import ProxyConnector
 
 from mastodon import Mastodon, streaming
-from mastodon.errors import MastodonError
 from common import db
 from common.types import minimalStatus, listenerStats
 
@@ -40,6 +43,10 @@ parser.add_argument('--logdir', default="logs", help="Output debugging logs to t
 parser.add_argument('--nolog', action="store_true", help="Do not log to disk")
 parser.add_argument('--nostatus', action="store_true", help="Don't show status screen. Saves CPU and some RAM")
 parser.add_argument('--nompy', action="store_true", help="Do not use mastodon.py, and only use native Websockets")
+proxyOptions = parser.add_mutually_exclusive_group()
+proxyOptions.add_argument('--proxy', type=str, help="SOCKS4/5 or HTTP proxy, in uri://user:pass@host:port format")
+proxyOptions.add_argument('--tor', action='store', dest='proxy', const="socks5://127.0.0.1:9050", nargs="?",
+                          help="Shortcut for --proxy socks5://127.0.0.1:9050")
 
 
 def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
@@ -57,8 +64,9 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
     stats.lastStatusTimestamp = time()
     stats.receivedStatusCount += 1
 
-    url = s['url'].split('://')[1]
-    domain = url.split('/')[0]
+    parsedurl = urlparse(s['url'])
+    domain = parsedurl.netloc
+    url = domain + parsedurl.path
 
     # This is here and not past the dedupe check because (I'm guessing) it's less CPU heavy to do some string
     # checks than checking for dict membership. This also prevents excluded domains from doing certain things,
@@ -209,10 +217,20 @@ class nativeWebsocketsListener():
         self.htmlparser.ignore_links = True
         self.htmlparser.body_width = 0
 
-    async def listen(self, retries=5, backoff=0.5):
+    async def listen(self, retries=5, backoff=0.5, useragent=None, proxy=None):
         retriesLeft = retries
         lastRetry = time()
         lastBackoff = backoff
+
+        wsargs = {"user_agent_header": useragent, "open_timeout": 5, "max_queue": 16}
+
+        if proxy:
+            _proxy = Proxy.from_url(proxy)
+            host = urlparse(self.endpoint).netloc
+            sock = await _proxy.connect(dest_host=host, dest_port=443)
+
+            wsargs.update({"sock": sock, "server_hostname": host})
+
         while True:
             # Websockets documentation says that .connect(), when used like "async for ws in websockets.connect()"
             # will raise exceptions, allowing you to decide which get retried and which raise further. __aiter__ in
@@ -220,7 +238,7 @@ class nativeWebsocketsListener():
             # catchall except block never has any opportunity to raise.
             # This means that every exception other than CancelledError will retry forever.
             try:
-                async with websockets.connect(self.endpoint, user_agent_header=args.useragent, open_timeout=5) as ws:
+                async with websockets.connect(self.endpoint, **wsargs) as ws:
                     await ws.send('{ "type": "subscribe", "stream": "public"}')
                     self.stats.status = 2
                     async for message in ws:
@@ -300,7 +318,12 @@ async def flushtodb():
 
 
 def mkmpy(domain):
-    mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent)
+    if args.proxy:
+        customSession = session()
+        customSession.proxies.update({'http': args.proxy, 'https': args.proxy})
+    else:
+        customSession = None
+    mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent, session=customSession)
     return mpyClient
 
 
@@ -316,7 +339,7 @@ async def domainWorker(domain, stats):
 
     listener = nativeWebsocketsListener("wss://%s" % streamingBase, stats)
     try:
-        await listener.listen()
+        await listener.listen(useragent=args.useragent, proxy=args.proxy)
     except asyncio.CancelledError:
         raise
     except websockets.InvalidStatusCode:
@@ -324,8 +347,7 @@ async def domainWorker(domain, stats):
     except websockets.InvalidURI:
         logmessage = "Redirected, but we didn't capture it properly."
     except Exception as e:
-        logmessage = "Unhandled exception in websockets."
-        log.debug(logwrap(repr(e)))
+        logmessage = "Unhandled exception %s in websockets." % repr(e)
 
     stats.status = -2
     if args.nompy:
@@ -333,7 +355,6 @@ async def domainWorker(domain, stats):
         return False
     else:
         log.debug(logwrap(logmessage + " Falling back to mastodon.py"))
-
 
     # Fallback to mastodon.py
     try:
@@ -346,10 +367,11 @@ async def domainWorker(domain, stats):
 
     try:
         await shutdownEvent.wait()
-        stats.status = -2
     except asyncio.CancelledError:
         streamingHandler.close()
         raise
+    finally:
+        stats.status = -2
 
 
 async def spawnCollectorWorker(domain):
@@ -378,12 +400,18 @@ async def nativeTestDomain(domain, retries: int = 0, backoff: int = 2):
                 # Check if Streaming API is up, and also get redirected if needed.
                 streamingBase = ''.join((resp.url.host, resp.url.path)).rstrip('/public')
                 return True, streamingBase
-
+        except asyncio.CancelledError:
+            raise
         except asyncio.TimeoutError:
             logmessage = "Timed out during health check."
-
         except aiohttp.ClientConnectorError as e:
             logmessage = "Generic aiohttp error %s." % repr(e)
+        except ProxyError as e:
+            log.error(logwrap("Proxy error %s during health check. Exiting." % repr(e)))
+            return False, None
+        except Exception as e:
+            log.warn(logwrap("Unhandled exception %s during health check. Exiting." % repr(e)))
+            return False, None
 
         if retries:
             # Assume temporary problem, retry
@@ -410,7 +438,12 @@ async def collectorLoop(domains):
     global httpsession
     global shutdownEvent
     log.debug("Started with config %s" % args)
-    httpsession = aiohttp.ClientSession(headers={'User-Agent': args.useragent})
+
+    if args.proxy:
+        connector = ProxyConnector.from_url(args.proxy)
+    else:
+        connector = None
+    httpsession = aiohttp.ClientSession(headers={'User-Agent': args.useragent}, connector=connector)
     shutdownEvent = asyncio.Event()
 
     log.debug("Starting workers for %i domains" % len(domains))
@@ -456,14 +489,6 @@ async def collectorLoop(domains):
             await httpsession.close()
             await flushtodb()
             raise
-
-
-def buildDomainList(args):
-    domains = set([i for i in args.server])
-    for domainfile in args.list:
-        with open(domainfile) as f:
-            domains.update([i.strip().split(',')[0] for i in f.readlines()])
-    return list(domains)
 
 
 def buildListFromArgs(direct, lists, nocsv=False):
