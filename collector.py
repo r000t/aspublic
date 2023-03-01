@@ -36,9 +36,9 @@ parser.add_argument('--useragent', type=str, help="HTTP User-Agent to present wh
                     default="Collector/0.1.3")
 parser.add_argument('--discover', action="store_true", help="Automatically try to listen to new instances")
 parser.add_argument('--debug', action="store_true", help="Enable verbose output useful for debugging")
-parser.add_argument('--logdir', default="logs", help="Output debugging logs to this directory.")
+parser.add_argument('--logdir', default="logs", help="Output debugging logs to this directory")
 parser.add_argument('--nolog', action="store_true", help="Do not log to disk")
-parser.add_argument('--nostatus', action="store_true", help="Don't show status screen. May save RAM.")
+parser.add_argument('--nostatus', action="store_true", help="Don't show status screen. Saves CPU and some RAM")
 
 
 def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
@@ -208,7 +208,10 @@ class nativeWebsocketsListener():
         self.htmlparser.ignore_links = True
         self.htmlparser.body_width = 0
 
-    async def listen(self):
+    async def listen(self, retries=5, backoff=0.5):
+        retriesLeft = retries
+        lastRetry = time()
+        lastBackoff = backoff
         while True:
             # Websockets documentation says that .connect(), when used like "async for ws in websockets.connect()"
             # will raise exceptions, allowing you to decide which get retried and which raise further. __aiter__ in
@@ -229,10 +232,23 @@ class nativeWebsocketsListener():
                                      self.htmlparser)
 
             except websockets.ConnectionClosedError as e:
-                log.info("[%s] [websockets] Websockets closed: %s; Retrying." % (self.stats.domain, e))
-                self.stats.status = -1
-                await asyncio.sleep(5)
-                continue
+                if retriesLeft:
+                    # Reset retry counter if the last retry was more than 5 minutes ago.
+                    if (lastRetry + 300) < time():
+                        retriesLeft = retries
+                        lastBackoff = backoff
+
+                    self.stats.status = -1
+                    log.debug("[%s] [websockets] Websockets closed: %s; Retrying in % .1fs" % (self.stats.domain, e, lastBackoff))
+                    await asyncio.sleep(lastBackoff)
+
+                    retriesLeft -= 1
+                    lastRetry = time()
+                    lastBackoff = backoff * 2
+                    continue
+
+                else:
+                    log.info("[%s] [websockets] Websockets closed: %s; Exhausted retries." % (self.stats.domain, e))
 
 
 class mpyStreamListener(streaming.StreamListener):
@@ -294,19 +310,19 @@ async def domainWorker(domain, stats):
     result, streamingBase = await nativeTestDomain(domain, retries=5)
     if not result:
         log.info(logwrap("Failed self-testing. Not connecting."))
+        stats.status = -2
         return False
 
     listener = nativeWebsocketsListener("wss://%s" % streamingBase, stats)
     try:
         await listener.listen()
     except websockets.InvalidStatusCode:
-        log.debug(logwrap("Refused websockets connection."))
+        log.debug(logwrap("Refused websockets connection. Falling back to mastodon.py"))
     except websockets.InvalidURI:
-        log.debug(logwrap("Redirected, but we didn't capture it properly."))
+        log.debug(logwrap("Redirected, but we didn't capture it properly. Falling back to mastodon.py"))
     except Exception as e:
-        log.error(logwrap("Unhandled exception in websockets. Falling back."))
+        log.error(logwrap("Unhandled exception in websockets. Falling back. Falling back to mastodon.py"))
         log.debug(logwrap(repr(e)))
-
     finally:
         stats.status = -2
 
@@ -336,14 +352,18 @@ async def spawnCollectorWorker(domain):
     workers[wid] = (asyncio.create_task(domainWorker(domain, stats)), stats)
 
 
-async def nativeTestDomain(domain, retries=0):
+async def nativeTestDomain(domain, retries: int = 0, backoff: int = 2):
     def logwrap(message):
         return "[%s] [nativeTester] %s" % (domain, message)
 
     while True:
         try:
             async with httpsession.get('https://%s/api/v1/streaming/public' % domain, timeout=5) as resp:
+                if resp.status >= 500:
+                    log.debug(logwrap("HTTP 5XX Error, not retrying."))
+                    return False, None
                 if resp.status >= 400:
+                    log.debug(logwrap("HTTP 4XX Error, not retrying."))
                     return False, None
 
                 # Check if Streaming API is up, and also get redirected if needed.
@@ -351,16 +371,20 @@ async def nativeTestDomain(domain, retries=0):
                 return True, streamingBase
 
         except asyncio.TimeoutError:
-            log.debug(logwrap("Timed out during health check. Not connecting."))
+            logmessage = "Timed out during health check."
 
         except aiohttp.ClientConnectorError as e:
-            if retries:
-                # Assume temporary DNS problem, retry
-                log.debug(logwrap("Retrying health check..."))
-                await asyncio.sleep(0.1)
-                retries -= 1
-                continue
-            return False, None
+            logmessage = "Generic aiohttp error %s." % repr(e)
+
+        if retries:
+            # Assume temporary problem, retry
+            log.debug(logwrap(logmessage + " Retrying in %is") % backoff)
+            await asyncio.sleep(backoff)
+            backoff = backoff * 2
+            retries -= 1
+            continue
+        log.debug(logwrap(logmessage + " Not retrying."))
+        return False, None
 
 
 async def discoverDomain(domain):
@@ -376,6 +400,7 @@ async def discoverDomain(domain):
 async def collectorLoop(domains):
     global httpsession
     global shutdownEvent
+    log.debug("Started with config %s" % args)
     httpsession = aiohttp.ClientSession(headers={'User-Agent': args.useragent})
     shutdownEvent = asyncio.Event()
 
@@ -470,7 +495,7 @@ def statusScreen(c):
     t.add_column("Last Status")
     t.add_column("Statuses")
     t.add_column("Unique")
-    t.add_column("Rejected")
+    t.add_column("Dropped")
 
     statusMap = {0: "INIT",
                  1: "SETUP",
