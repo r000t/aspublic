@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from time import time
 from datetime import datetime, date
 from common import db
-app = FastAPI(title="as:Public", version="0.1.3")
+app = FastAPI(title="as:Public", version="0.1.4")
 
 ## Path to status database from a Collector
 #dbpath = 'statuses.sqlite3'

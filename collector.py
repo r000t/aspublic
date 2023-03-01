@@ -1,4 +1,5 @@
 #!/usr/bin/python
+import sys
 import argparse
 import asyncio
 import aiohttp
@@ -11,10 +12,6 @@ from time import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from html2text import HTML2Text
-from requests import session
-from python_socks.async_.asyncio import Proxy
-from python_socks._errors import ProxyError
-from aiohttp_socks import ProxyConnector
 
 from mastodon import Mastodon, streaming
 from common import db
@@ -36,7 +33,7 @@ parser.add_argument("--exclude-regex", action='append', default=[],
 parser.add_argument("--exclude-regex-list", action='append', default=[],
                     help="Read regular expressions to drop from this list.")
 parser.add_argument('--useragent', type=str, help="HTTP User-Agent to present when opening connections",
-                    default="Collector/0.1.3")
+                    default="Collector/0.1.4")
 parser.add_argument('--discover', action="store_true", help="Automatically try to listen to new instances")
 parser.add_argument('--debug', action="store_true", help="Enable verbose output useful for debugging")
 parser.add_argument('--logdir', default="logs", help="Output debugging logs to this directory")
@@ -345,7 +342,7 @@ async def domainWorker(domain, stats):
     except websockets.InvalidStatusCode:
         logmessage = "Refused websockets connection."
     except websockets.InvalidURI:
-        logmessage = "Redirected, but we didn't capture it properly."
+        logmessage = "Redirected to %s but we didn't capture it properly." % streamingBase
     except Exception as e:
         logmessage = "Unhandled exception %s in websockets." % repr(e)
 
@@ -437,7 +434,12 @@ async def discoverDomain(domain):
 async def collectorLoop(domains):
     global httpsession
     global shutdownEvent
-    log.debug("Started with config %s" % args)
+    if args.debug:
+        hostdetails = ' '.join([platform.system(), platform.version(), platform.processor()])
+    else:
+        hostdetails = sys.platform
+    await log.debug("%s started on Python %s, %s" % (parser.prog, sys.version, hostdetails))
+    await log.debug("Started with config %s" % args)
 
     if args.proxy:
         connector = ProxyConnector.from_url(args.proxy)
@@ -588,6 +590,17 @@ def logSetup():
 
 if __name__ == '__main__':
     args = parser.parse_args()
+    if args.debug:
+        import platform
+
+    if args.proxy:
+        from python_socks.async_.asyncio import Proxy
+        from python_socks._errors import ProxyError
+        from aiohttp_socks import ProxyConnector
+        from requests import session
+    else:
+        class ProxyError(Exception):
+            pass
 
     if not args.nostatus:
         from rich.console import Console
