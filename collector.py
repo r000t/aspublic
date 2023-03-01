@@ -6,6 +6,8 @@ import websockets
 import json
 import re
 import dateutil
+import logging
+from aiologger import Logger
 from time import time
 from datetime import datetime, timezone
 from html2text import HTML2Text
@@ -37,6 +39,9 @@ parser.add_argument('--nostatus', action="store_true", help="Don't show status s
 
 
 def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
+    def logwrap(message):
+        return "[%s] [%s] %s" % (stats.domain, stats.method, message)
+
     # This is the opt-out mechanism.
     if s['visibility'] != 'public':
         return False
@@ -56,8 +61,7 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
     # such as filling up the dedupe cache.
     for i in excluded_domains:
         if domain.endswith(i):
-            if args.debug:
-                print("Rejected status %s (Matched excluded domain %s)" % (s['url'], i))
+            log.debug(logwrap("Rejected status %s (Matched excluded domain %s)" % (s['url'], i)))
             stats.rejectedStatusCount += 1
             return False
 
@@ -67,8 +71,7 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
         parsedText = htmlparser.handle(s['content']).strip()
         if excluded_regex_compiled:
             if excluded_regex_compiled.search(parsedText):
-                if args.debug:
-                    print("Rejected status %s (Matched excluded regex)" % s['url'])
+                log.debug(logwrap("Rejected status %s (Matched excluded regex)" % s['url']))
                 stats.rejectedStatusCount += 1
                 return False
 
@@ -79,7 +82,7 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
             dt = datetime.fromisoformat(s['created_at'])
 
         if dt.tzinfo is None:
-            print("Fixing naive datetime...")
+            log.warning(logwrap("Fixing naive datetime. This should never happen."))
             dt.replace(tzinfo=timezone.utc)
 
         extract = minimalStatus(url=url,
@@ -223,8 +226,7 @@ class nativeWebsocketsListener():
                                      self.htmlparser)
 
             except websockets.ConnectionClosedError as e:
-                if args.debug:
-                    print("[!] [%s] Websockets closed: %s; Retrying." % (self.stats.domain, e))
+                log.info("[%s] [websockets] Websockets closed: %s; Retrying." % (self.stats.domain, e))
                 self.stats.status = -1
                 await asyncio.sleep(5)
                 continue
@@ -274,7 +276,7 @@ async def flushtodb():
     await db.batchwrite(sqlitevalues, args.db)
     for i in sqlitevalues:
         unsent_statuses.pop(i[0])
-    print("Flushed %i statuses, took %i ms." % (len(sqlitevalues), int((time() - begints) * 1000)))
+    log.info("Flushed %i statuses, took %i ms." % (len(sqlitevalues), int((time() - begints) * 1000)))
 
 
 def mkmpy(domain):
@@ -283,24 +285,24 @@ def mkmpy(domain):
 
 
 async def domainWorker(domain, stats):
+    def logwrap(message):
+        return "[%s] [domainWorker] %s" % (domain, message)
+
     result, streamingBase = await nativeTestDomain(domain, retries=5)
     if not result:
-        print("[!] [%s] Failed self-testing. Not connecting." % domain)
+        log.info(logwrap("Failed self-testing. Not connecting."))
         return False
 
     listener = nativeWebsocketsListener("wss://%s" % streamingBase, stats)
     try:
         await listener.listen()
     except websockets.InvalidStatusCode:
-        if args.debug:
-            print("[!] [%s] Refused websockets connection." % domain)
+        log.debug(logwrap("Refused websockets connection."))
     except websockets.InvalidURI:
-        if args.debug:
-            print("[!] [%s] Redirected, but we didn't capture it properly." % domain)
+        log.debug(logwrap("Redirected, but we didn't capture it properly."))
     except Exception as e:
-        print("[!] [%s] Unhandled exception in websockets. Falling back." % domain)
-        if args.debug:
-            print(repr(e))
+        log.error(logwrap("Unhandled exception in websockets. Falling back."))
+        log.debug(logwrap(repr(e)))
 
     finally:
         stats.status = -2
@@ -332,6 +334,9 @@ async def spawnCollectorWorker(domain):
 
 
 async def nativeTestDomain(domain, retries=0):
+    def logwrap(message):
+        return "[%s] [nativeTester] %s" % (domain, message)
+
     while True:
         try:
             async with httpsession.get('https://%s/api/v1/streaming/public' % domain, timeout=5) as resp:
@@ -343,14 +348,12 @@ async def nativeTestDomain(domain, retries=0):
                 return True, streamingBase
 
         except asyncio.TimeoutError:
-            if args.debug:
-                print("[!] [%s] Timed out during health check. Not connecting.")
+            log.debug(logwrap("Timed out during health check. Not connecting."))
 
         except aiohttp.ClientConnectorError as e:
             if retries:
                 # Assume temporary DNS problem, retry
-                if args.debug:
-                    print("[i] [%s] native testing error: %s Retrying health check..." % (domain, e))
+                log.debug(logwrap("Retrying health check..."))
                 await asyncio.sleep(0.1)
                 retries -= 1
                 continue
@@ -360,8 +363,7 @@ async def nativeTestDomain(domain, retries=0):
 async def discoverDomain(domain):
     res = await nativeTestDomain(domain)
     if res[0]:
-        if args.debug:
-            print("[+] [%s] Passed testing, now listening." % domain)
+        log.debug("[%s] [discovery] Passed testing, now listening." % domain)
         discoveredDomains[domain] = 2
         await spawnCollectorWorker(domain)
     else:
@@ -374,8 +376,7 @@ async def collectorLoop(domains):
     httpsession = aiohttp.ClientSession(headers={'User-Agent': args.useragent})
     shutdownEvent = asyncio.Event()
 
-    if args.debug:
-        print("Starting workers for %i domains..." % len(domains))
+    log.debug("Starting workers for %i domains" % len(domains))
     for domain in domains:
         await spawnCollectorWorker(domain)
 
@@ -390,13 +391,11 @@ async def collectorLoop(domains):
 
             if lastflush + 120 < time():
                 if len(unsent_statuses):
-                    if args.debug:
-                        print("Flushing statuses to disk...")
+                    log.debug("Beginning flush to database")
                     await flushtodb()
                 lastflush = time()
 
-                if args.debug:
-                    print("Pruning dedupe cache...")
+                log.debug("Pruning dedupe cache")
                 ts = int(time())
                 for i in [k for k, v in dedupe.items() if v + 600 < ts]:
                     del dedupe[i]
@@ -415,7 +414,7 @@ async def collectorLoop(domains):
             await asyncio.sleep(5)
 
         except asyncio.CancelledError:
-            print("\nShutting down collector loop...")
+            log.info("Shutting down collector loop...")
             shutdownEvent.set()
             await httpsession.close()
             await flushtodb()
@@ -478,11 +477,22 @@ def statusScreen(c):
 
     for k,v in workers.items():
         stats: listenerStats = v[1]
+
+        if stats.lastStatusTimestamp:
+            lastStatusText = richText(datetime.fromtimestamp(stats.lastStatusTimestamp).strftime("%H:%M:%S"))
+            if (stats.lastStatusTimestamp + 300) < time():
+                lastStatusText.stylize("red")
+            elif (stats.lastStatusTimestamp + 30) < time():
+                lastStatusText.stylize("orange")
+
+        else:
+            lastStatusText = "-"
+
         t.add_row(str(k),
                   stats.domain,
                   statusMap[stats.status],
                   stats.method,
-                  datetime.fromtimestamp(stats.lastStatusTimestamp).strftime("%H:%M:%S"),
+                  lastStatusText,
                   str(stats.receivedStatusCount), str(stats.uniqueStatusCount), str(stats.rejectedStatusCount))
 
     c.print("as:Public Standalone Collector")
@@ -497,6 +507,16 @@ if __name__ == '__main__':
     if not args.nostatus:
         from rich.console import Console
         from rich.table import Table
+        from rich.text import Text as richText
+
+    #log = Logger.with_default_handlers()
+    log = logging.getLogger("collector")
+    log.setLevel(logging.DEBUG)
+    consoleHandler = logging.StreamHandler()
+    consoleHandler.setLevel(logging.DEBUG)
+    logFormatter = logging.Formatter('%(asctime)s|%(name)s|%(levelname)s|%(message)s')
+    consoleHandler.setFormatter(logFormatter)
+    log.addHandler(consoleHandler)
 
     domains = buildListFromArgs(args.server, args.list)
     excluded_domains = buildListFromArgs(args.exclude, args.exclude_list)
