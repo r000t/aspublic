@@ -6,8 +6,7 @@ attrs
 html2text
 aiosqlite
 aiohttp
-aiologger
-aiofiles
+aiologger[aiofiles]
 websockets
 rich
 

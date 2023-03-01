@@ -2,15 +2,18 @@
 import argparse
 import asyncio
 import aiohttp
+import aiologger.levels
 import websockets
 import json
 import re
 import dateutil
-import logging
-from aiologger import Logger
+from os import makedirs, path
 from time import time
+from aiologger import Logger
+from aiologger.handlers.files import AsyncFileHandler
 from datetime import datetime, timezone
 from html2text import HTML2Text
+
 from mastodon import Mastodon, streaming
 from mastodon.errors import MastodonError
 from common import db
@@ -35,6 +38,8 @@ parser.add_argument('--useragent', type=str, help="HTTP User-Agent to present wh
                     default="Collector/0.1.3")
 parser.add_argument('--discover', action="store_true", help="Automatically try to listen to new instances")
 parser.add_argument('--debug', action="store_true", help="Enable verbose output useful for debugging")
+parser.add_argument('--logdir', default="logs", help="Output debugging logs to this directory.")
+parser.add_argument('--nolog', action="store_true", help="Do not log to disk")
 parser.add_argument('--nostatus', action="store_true", help="Don't show status screen. May save RAM.")
 
 
@@ -509,14 +514,13 @@ if __name__ == '__main__':
         from rich.table import Table
         from rich.text import Text as richText
 
-    #log = Logger.with_default_handlers()
-    log = logging.getLogger("collector")
-    log.setLevel(logging.DEBUG)
-    consoleHandler = logging.StreamHandler()
-    consoleHandler.setLevel(logging.DEBUG)
-    logFormatter = logging.Formatter('%(asctime)s|%(name)s|%(levelname)s|%(message)s')
-    consoleHandler.setFormatter(logFormatter)
-    log.addHandler(consoleHandler)
+    logLevel = {True: aiologger.levels.LogLevel.DEBUG, False: aiologger.levels.LogLevel.INFO}[args.debug]
+    log = Logger.with_default_handlers(name="collector", level=logLevel, formatter="%(asctime)s|%(name)s|%(levelname)s|%(message)s")
+    if not args.nolog:
+        makedirs(args.logdir, exist_ok=True)
+        fileLoggingHandler = AsyncFileHandler(filename=path.join(args.logdir, 'collector.log'))
+        fileLoggingHandler.level = aiologger.levels.LogLevel.DEBUG
+        log.add_handler(fileLoggingHandler)
 
     domains = buildListFromArgs(args.server, args.list)
     excluded_domains = buildListFromArgs(args.exclude, args.exclude_list)
