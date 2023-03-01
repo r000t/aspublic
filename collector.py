@@ -39,6 +39,7 @@ parser.add_argument('--debug', action="store_true", help="Enable verbose output 
 parser.add_argument('--logdir', default="logs", help="Output debugging logs to this directory")
 parser.add_argument('--nolog', action="store_true", help="Do not log to disk")
 parser.add_argument('--nostatus', action="store_true", help="Don't show status screen. Saves CPU and some RAM")
+parser.add_argument('--nompy', action="store_true", help="Do not use mastodon.py, and only use native Websockets")
 
 
 def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
@@ -316,15 +317,23 @@ async def domainWorker(domain, stats):
     listener = nativeWebsocketsListener("wss://%s" % streamingBase, stats)
     try:
         await listener.listen()
+    except asyncio.CancelledError:
+        raise
     except websockets.InvalidStatusCode:
-        log.debug(logwrap("Refused websockets connection. Falling back to mastodon.py"))
+        logmessage = "Refused websockets connection."
     except websockets.InvalidURI:
-        log.debug(logwrap("Redirected, but we didn't capture it properly. Falling back to mastodon.py"))
+        logmessage = "Redirected, but we didn't capture it properly."
     except Exception as e:
-        log.error(logwrap("Unhandled exception in websockets. Falling back. Falling back to mastodon.py"))
+        logmessage = "Unhandled exception in websockets."
         log.debug(logwrap(repr(e)))
-    finally:
-        stats.status = -2
+
+    stats.status = -2
+    if args.nompy:
+        log.error(logwrap(logmessage + " Exiting."))
+        return False
+    else:
+        log.debug(logwrap(logmessage + " Falling back to mastodon.py"))
+
 
     # Fallback to mastodon.py
     try:
