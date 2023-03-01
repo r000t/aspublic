@@ -2,15 +2,13 @@
 import argparse
 import asyncio
 import aiohttp
-import aiologger.levels
 import websockets
 import json
 import re
 import dateutil
+import logging
 from os import makedirs, path
 from time import time
-from aiologger import Logger
-from aiologger.handlers.files import AsyncFileHandler
 from datetime import datetime, timezone
 from html2text import HTML2Text
 
@@ -506,6 +504,29 @@ def statusScreen(c):
     c.print("Dedupe cache size: %i" % len(dedupe))
 
 
+def logSetup():
+    from aiologger import Logger
+    from aiologger.levels import LogLevel
+    from aiologger.filters import StdoutFilter
+    from aiologger.handlers.files import AsyncFileHandler
+    from aiologger.handlers.streams import AsyncStreamHandler
+    from aiologger.formatters.base import Formatter
+    from sys import stdout, stderr
+
+    logLevel = {True: LogLevel.DEBUG, False: LogLevel.INFO}[args.debug]
+    formatter = Formatter("%(asctime)s|%(name)s|%(levelname)s|%(message)s")
+    log = Logger(name="collector")
+    log.add_handler(AsyncStreamHandler(stream=stdout, level=logLevel, formatter=formatter, filter=StdoutFilter()))
+    log.add_handler(AsyncStreamHandler(stream=stderr, level=LogLevel.WARNING, formatter=formatter))
+    if not args.nolog:
+        makedirs(args.logdir, exist_ok=True)
+        fileLoggingHandler = AsyncFileHandler(filename=path.join(args.logdir, 'collector.log'), formatter=formatter)
+        fileLoggingHandler.level = LogLevel.DEBUG
+        log.add_handler(fileLoggingHandler)
+
+    return log
+
+
 if __name__ == '__main__':
     args = parser.parse_args()
 
@@ -513,14 +534,6 @@ if __name__ == '__main__':
         from rich.console import Console
         from rich.table import Table
         from rich.text import Text as richText
-
-    logLevel = {True: aiologger.levels.LogLevel.DEBUG, False: aiologger.levels.LogLevel.INFO}[args.debug]
-    log = Logger.with_default_handlers(name="collector", level=logLevel, formatter="%(asctime)s|%(name)s|%(levelname)s|%(message)s")
-    if not args.nolog:
-        makedirs(args.logdir, exist_ok=True)
-        fileLoggingHandler = AsyncFileHandler(filename=path.join(args.logdir, 'collector.log'))
-        fileLoggingHandler.level = aiologger.levels.LogLevel.DEBUG
-        log.add_handler(fileLoggingHandler)
 
     domains = buildListFromArgs(args.server, args.list)
     excluded_domains = buildListFromArgs(args.exclude, args.exclude_list)
@@ -531,6 +544,7 @@ if __name__ == '__main__':
         excluded_regex_compiled = False
 
     if args.mode == "run":
+        log = logSetup()
         db.checkdb(args.db)
 
         # Setup global variables before starting async loop
@@ -546,4 +560,4 @@ if __name__ == '__main__':
             exit()
 
     elif args.mode == "test":
-        asyncio.run(testDomains(domains))
+        asyncio.run(testDomains(domains), debug=True)
