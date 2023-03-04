@@ -124,7 +124,7 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
 @define
 class sink:
     mapstatuses: bool = field(default=False, kw_only=True)
-    minFlushFreq: int = field(default=10, kw_only=True)
+    minFlushFreq: int = field(default=30, kw_only=True)
     maxFlushFreq: int = field(default=300, kw_only=True)
     lastflushed: int = field(default=0, init=False)
     missed: set = field(default=set(), init=False)
@@ -148,10 +148,11 @@ class sink:
 class sqlitesink(sink):
     dbpath: str
     mapstatuses: bool = field(default=True, kw_only=True)
+    maxFlushFreq: int = field(default=120, kw_only=True)
 
     async def flush(self, statuses: tuple):
         begints = time()
-        await db.batchwrite(statuses[1], args.db)
+        await db.batchwrite(statuses[1], self.dbpath)
         log.info("Flushed %i statuses, took %i ms." % (len(statuses[1]), int((time() - begints) * 1000)))
 
 
@@ -163,7 +164,6 @@ class recordersink(sink):
     async def flush(self, statuses: tuple):
         payload = zstd.ZSTD_compress(msgpack.dumps(statuses))
         r = await httpsession.post('%s/api/recorder/checkin' % self.recorderuri, data=payload)
-        print(r)
 
 
 class AttribAccessDict(dict):
@@ -363,14 +363,18 @@ async def flushtosinks():
             log.error("[flushtosinks] Error %s in sink %s" % (repr(e), repr(sinktoflush)))
 
     flushable_sinks = [i for i in sinks if i.flushable()]
+    # Only push if any sinks have passed their max time between flushes
     if any([i.needs_flushed() for i in flushable_sinks]):
         log.debug("[flushtosinks] Flushing to eligible sinks...")
         flushable_statuses = unsent_statuses.copy()
+
+        # Only generate mapped statuses if any sinks use them
         if any([i.mapstatuses for i in flushable_sinks]):
+            # I thought there was a way to just get the values out as a tuple, like with the slots
+            # This probably is hilariously wasteful and likely ain't worth the bandwidth gain
             statusmap = minimalStatus.__slots__[:-1]
-            #I thought there was a way to just get the values out as a tuple, like with the slots
-            #This probably is hilariously wasteful and likely ain't worth the bandwidth gain
             mappedstatuses = (statusmap, tuple([tuple([getattr(i, value) for value in statusmap]) for i in flushable_statuses.values()]))
+
         for i in flushable_sinks:
             asyncio.create_task(flush(i))
 
@@ -526,9 +530,8 @@ async def collectorLoop(domains):
                 c.clear()
                 statusScreen(c)
 
-            if lastflush + 5 < time():
+            if lastflush + 30 < time():
                 if len(unsent_statuses):
-                    log.debug("Attempting push to all registered sinks...")
                     await flushtosinks()
                 lastflush = time()
 
