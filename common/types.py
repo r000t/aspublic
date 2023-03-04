@@ -1,9 +1,8 @@
 import attr.setters
-import attrs
 from attrs import define, asdict, field
-from time import time
 
 defaultZeroIntField = field(default=0, converter=int, on_setattr=attr.setters.convert)
+
 
 @define(slots=True)
 class minimalStatus:

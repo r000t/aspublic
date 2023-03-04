@@ -8,6 +8,7 @@ import json
 import re
 import dateutil
 from os import makedirs, path
+from attrs import define, field
 from time import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -20,6 +21,8 @@ from common.types import minimalStatus, listenerStats
 parser = argparse.ArgumentParser(prog="as:Public Standalone Collector")
 parser.add_argument('mode', choices=["run", "test"])
 parser.add_argument('--db', default=db.default_dbpath, help="Use/create sqlite3 database at this location")
+parser.add_argument('-r', '--recorder', action='append', default=[],
+                    help="Push statuses to the recorder at this hostname.")
 parser.add_argument('-s', '--server', action='append', default=[],
                     help="Connect to this server. You can call this multiple times.")
 parser.add_argument('-l', '--list', action='append', default=[],
@@ -116,6 +119,51 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
         # Skip status, update last seen time
         dedupe[s['url']] = time()
         return False
+
+
+@define
+class sink:
+    mapstatuses: bool = field(default=False, kw_only=True)
+    minFlushFreq: int = field(default=10, kw_only=True)
+    maxFlushFreq: int = field(default=300, kw_only=True)
+    lastflushed: int = field(default=0, init=False)
+    missed: set = field(default=set(), init=False)
+    busy: set = field(default=False, init=False)
+
+    async def flush(self, statuses: dict):
+        pass
+
+    def flushable(self):
+        if self.busy:
+            return False
+        if self.lastflushed + self.minFlushFreq > time():
+            return False
+        return True
+
+    def needs_flushed(self):
+        return self.lastflushed + self.maxFlushFreq < time()
+
+
+@define
+class sqlitesink(sink):
+    dbpath: str
+    mapstatuses: bool = field(default=True, kw_only=True)
+
+    async def flush(self, statuses: tuple):
+        begints = time()
+        await db.batchwrite(statuses[1], args.db)
+        log.info("Flushed %i statuses, took %i ms." % (len(statuses[1]), int((time() - begints) * 1000)))
+
+
+@define
+class recordersink(sink):
+    recorderuri: str
+    mapstatuses: bool = field(default=True, kw_only=True)
+
+    async def flush(self, statuses: tuple):
+        payload = zstd.ZSTD_compress(msgpack.dumps(statuses))
+        r = await httpsession.post('%s/api/recorder/checkin' % self.recorderuri, data=payload)
+        print(r)
 
 
 class AttribAccessDict(dict):
@@ -301,17 +349,33 @@ class mpyStreamTester(streaming.StreamListener):
         self.gotHeartbeat = True
 
 
-async def flushtodb():
-    begints = time()
+async def flushtosinks():
+    async def flush(sinktoflush: sink):
+        log.debug("[flushtosinks] Flushing to %s" % type(sinktoflush))
+        try:
+            if sinktoflush.mapstatuses:
+                await sinktoflush.flush(mappedstatuses)
+            else:
+                await sinktoflush.flush(flushable_statuses.copy())
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error("[flushtosinks] Error %s in sink %s" % (repr(e), repr(sinktoflush)))
 
-    # A list comprehension is beautiful at ANY size.
-    sqlitevalues = [(obj.url, obj.text, obj.subject, obj.created, obj.language, obj.bot, obj.reply, obj.attachments)
-                    for url, obj in unsent_statuses.items()]
+    flushable_sinks = [i for i in sinks if i.flushable()]
+    if any([i.needs_flushed() for i in flushable_sinks]):
+        log.debug("[flushtosinks] Flushing to eligible sinks...")
+        flushable_statuses = unsent_statuses.copy()
+        if any([i.mapstatuses for i in flushable_sinks]):
+            statusmap = minimalStatus.__slots__[:-1]
+            #I thought there was a way to just get the values out as a tuple, like with the slots
+            #This probably is hilariously wasteful and likely ain't worth the bandwidth gain
+            mappedstatuses = (statusmap, tuple([tuple([getattr(i, value) for value in statusmap]) for i in flushable_statuses.values()]))
+        for i in flushable_sinks:
+            asyncio.create_task(flush(i))
 
-    await db.batchwrite(sqlitevalues, args.db)
-    for i in sqlitevalues:
-        unsent_statuses.pop(i[0])
-    log.info("Flushed %i statuses, took %i ms." % (len(sqlitevalues), int((time() - begints) * 1000)))
+        for i in flushable_statuses:
+            del(unsent_statuses[i])
 
 
 def mkmpy(domain):
@@ -440,6 +504,7 @@ async def collectorLoop(domains):
         hostdetails = sys.platform
     await log.debug("%s started on Python %s, %s" % (parser.prog, sys.version, hostdetails))
     await log.debug("Started with config %s" % args)
+    await log.debug("%i sinks registered." % len(sinks))
 
     if args.proxy:
         connector = ProxyConnector.from_url(args.proxy)
@@ -461,10 +526,10 @@ async def collectorLoop(domains):
                 c.clear()
                 statusScreen(c)
 
-            if lastflush + 120 < time():
+            if lastflush + 5 < time():
                 if len(unsent_statuses):
-                    log.debug("Beginning flush to database")
-                    await flushtodb()
+                    log.debug("Attempting push to all registered sinks...")
+                    await flushtosinks()
                 lastflush = time()
 
                 log.debug("Pruning dedupe cache")
@@ -489,7 +554,7 @@ async def collectorLoop(domains):
             log.info("Shutting down collector loop...")
             shutdownEvent.set()
             await httpsession.close()
-            await flushtodb()
+            await flushtosinks()
             raise
 
 
@@ -593,6 +658,10 @@ if __name__ == '__main__':
     if args.debug:
         import platform
 
+    if args.recorder:
+        import msgpack
+        import zstd
+
     if args.proxy:
         from python_socks.async_.asyncio import Proxy
         from python_socks._errors import ProxyError
@@ -618,6 +687,10 @@ if __name__ == '__main__':
     if args.mode == "run":
         log = logSetup()
         db.checkdb(args.db)
+
+        sinks = []
+        sinks.append(sqlitesink(args.db))
+        sinks.extend([recordersink(i) for i in args.recorder])
 
         # Setup global variables before starting async loop
         workers = {}
