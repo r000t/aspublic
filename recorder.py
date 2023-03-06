@@ -6,7 +6,7 @@ from time import time
 from common import db
 from common.types import minimalStatus
 
-app = FastAPI(title="as:Public Recorder", version="0.1.4")
+app = FastAPI(title="as:Public Recorder", version="0.1.5")
 dbpath = "recorder.sqlite3"
 dedupe = {}
 unflushed_statuses = {}
