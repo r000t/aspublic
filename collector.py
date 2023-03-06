@@ -73,7 +73,8 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
     # such as filling up the dedupe cache.
     for i in excluded_domains:
         if domain.endswith(i):
-            log.debug(logwrap("Rejected status %s (Matched excluded domain %s)" % (s['url'], i)))
+            if args.debug:
+                log.debug(logwrap("Rejected status %s (Matched excluded domain %s)" % (s['url'], i)))
             stats.rejectedStatusCount += 1
             return False
 
@@ -83,7 +84,8 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
         parsedText = htmlparser.handle(s['content']).strip()
         if excluded_regex_compiled:
             if excluded_regex_compiled.search(parsedText):
-                log.debug(logwrap("Rejected status %s (Matched excluded regex)" % s['url']))
+                if args.debug:
+                    log.debug(logwrap("Rejected status %s (Matched excluded regex)" % s['url']))
                 stats.rejectedStatusCount += 1
                 return False
 
@@ -148,7 +150,7 @@ class sink:
 class sqlitesink(sink):
     dbpath: str
     mapstatuses: bool = field(default=True, kw_only=True)
-    maxFlushFreq: int = field(default=120, kw_only=True)
+    minFlushFreq: int = field(default=60, kw_only=True)
 
     async def flush(self, statuses: tuple):
         begints = time()
@@ -262,12 +264,12 @@ class nativeWebsocketsListener():
         self.htmlparser.ignore_links = True
         self.htmlparser.body_width = 0
 
-    async def listen(self, retries=5, backoff=0.5, useragent=None, proxy=None):
+    async def listen(self, retries=6, backoff=1, useragent=None, proxy=None):
         retriesLeft = retries
         lastRetry = time()
         lastBackoff = backoff
 
-        wsargs = {"user_agent_header": useragent, "open_timeout": 5, "max_queue": 16}
+        wsargs = {"user_agent_header": useragent, "open_timeout": 10, "max_queue": 16}
 
         if proxy:
             _proxy = Proxy.from_url(proxy)
@@ -295,7 +297,7 @@ class nativeWebsocketsListener():
                                      self.stats,
                                      self.htmlparser)
 
-            except websockets.ConnectionClosedError as e:
+            except (websockets.ConnectionClosedError, TimeoutError) as e:
                 if retriesLeft:
                     # Reset retry counter if the last retry was more than 5 minutes ago.
                     if (lastRetry + 300) < time():
@@ -303,7 +305,7 @@ class nativeWebsocketsListener():
                         lastBackoff = backoff
 
                     self.stats.status = -1
-                    log.debug("[%s] [websockets] Websockets closed: %s; Retrying in % .1fs" % (self.stats.domain, e, lastBackoff))
+                    log.debug("[%s] [websockets] Websockets closed: %s; Retrying in %is" % (self.stats.domain, e, lastBackoff))
                     await asyncio.sleep(lastBackoff)
 
                     retriesLeft -= 1
@@ -357,6 +359,7 @@ async def flushtosinks():
                 await sinktoflush.flush(mappedstatuses)
             else:
                 await sinktoflush.flush(flushable_statuses.copy())
+            sinktoflush.lastflushed = int(time())
         except asyncio.CancelledError:
             raise
         except Exception as e:
