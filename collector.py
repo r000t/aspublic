@@ -457,17 +457,28 @@ async def nativeTestDomain(domain, retries: int = 0, backoff: int = 2):
 
     while True:
         try:
-            async with httpsession.get('https://%s/api/v1/streaming/public' % domain, timeout=5) as resp:
-                if resp.status >= 500:
-                    log.debug(logwrap("HTTP 5XX Error, not retrying."))
-                    return False, None
-                if resp.status >= 400:
-                    log.debug(logwrap("HTTP 4XX Error, not retrying."))
-                    return False, None
+            for endpoint in ["/api/v1/streaming/public", "/api/v1/streaming"]:
+                log.debug(logwrap("trying %s" % endpoint))
+                async with httpsession.get('https://%s%s' % (domain, endpoint), timeout=5) as resp:
+                    if resp.url.host != domain:
+                        # Retry with new domain
+                        log.debug(logwrap("Redirected to %s, restarting test." % resp.url.host))
+                        return await nativeTestDomain(resp.url.host)
+                    if resp.status >= 500:
+                        reason = resp.status
+                        continue
+                    if resp.status >= 400:
+                        reason = resp.status
+                        continue
 
-                # Check if Streaming API is up, and also get redirected if needed.
-                streamingBase = ''.join((resp.url.host, resp.url.path)).rstrip('/public')
-                return True, streamingBase
+                    # Check if Streaming API is up, and also get redirected if needed.
+                    streamingBase = ''.join((resp.url.host, resp.url.path)).rstrip('/public')
+                    return True, streamingBase
+
+            else:
+                log.debug(logwrap("%s Error. Exhausted endpoints to try. Giving up." % reason))
+                return False, None
+
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
