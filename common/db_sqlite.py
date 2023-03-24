@@ -114,10 +114,10 @@ async def search(dbpath,
         results = []
         async with db.execute(sqlitequery, ('"%s"' % q,)) as cursor:
             async for row in cursor:
-                results.append(minimalStatus(url= "https://" + row[0],
+                results.append(minimalStatus(url="https://" + row[0],
                                              text=row[1],
                                              subject=row[2],
-                                             created=datetime.fromtimestamp(int((row[3]))).isoformat(),
+                                             created=datetime.fromtimestamp(int(row[3])).isoformat(),
                                              language=row[4],
                                              bot=row[5],
                                              reply=row[6],

@@ -3,15 +3,19 @@ from typing import List, Optional, Union
 from pydantic import BaseModel, Field, HttpUrl, AnyUrl
 from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
-from attrs import define
+from attrs import define, field
 from re import findall
 from time import time
 from datetime import datetime, date
-from common import db_sqlite
+from common import db_sqlite, db_postgres
 app = FastAPI(title="as:Public Viewer", version="0.1.5")
 
-## Path to status database from a Collector
+## Backend to use, either 'sqlite' or 'postgres'
+backend = 'postgres'
+
+## Path to status database from a Collector, or postgres URI
 #dbpath = 'statuses.sqlite3'
+#dbpath = 'username:password@host:port/database'
 dbpath = db_sqlite.default_dbpath
 
 ## Set to True to serve static files from the application. You'll need to do that to run it locally.
@@ -40,8 +44,11 @@ class ResultModel(BaseModel):
 
 
 @define
-class searchBackend():
-    def translateSearchString(self, searchString):
+class searchBackend:
+    path: str
+
+    @staticmethod
+    def translateSearchString(searchString):
         query = searchString
         and_query = searchString[:]
 
@@ -72,6 +79,18 @@ class searchBackend():
         pass
 
 
+@define
+class sqliteSearchBackend(searchBackend):
+    async def _search(self, and_query, phrase_query, not_query, *args, **kwargs):
+        res = await db_sqlite.search(self.path, and_query, phrase_query, not_query, **kwargs)
+        return res
+
+
+@define
+class postgresSearchBackend(searchBackend):
+    async def _search(self, and_query, phrase_query, not_query, *args, **kwargs):
+        res = await db_postgres.search(self.path, and_query, phrase_query, not_query, *args, **kwargs)
+        return res
 
 
 @app.get("/api/unstable/search", response_model=ResultModel)
@@ -87,8 +106,7 @@ async def read_item(q: str = Query(title="Single search term to look for in stat
     \n\nbots, replies, and attachments fields are optional. If they are not specified, or null, all posts are shown.
     If True, **only** that type of post will be shown. If False, that type of post will **not** be shown."""
     begints = time()
-    results = await db.search(db.default_dbpath,
-                              q=q,
+    results = await db.search(q=q,
                               domain=domain,
                               bots=bots,
                               replies=replies,
@@ -98,6 +116,17 @@ async def read_item(q: str = Query(title="Single search term to look for in stat
                               after=after)
 
     return {"results": results, "debug": {"dbtime_ms": int(((time() - begints) * 1000))}}
+
+
+@app.on_event("startup")
+async def recorder_startup():
+    global db
+
+    if backend.startswith('sqlite'):
+        db = sqliteSearchBackend(path=dbpath)
+    elif backend.startswith('postgres'):
+        db = postgresSearchBackend(path=dbpath)
+
 
 if mountLocalDirectory:
     app.mount("/", StaticFiles(directory="viewer-static", html=True), name="frontend")
