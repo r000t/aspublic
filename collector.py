@@ -7,6 +7,7 @@ import websockets
 import json
 import re
 import dateutil
+import traceback
 from os import makedirs, path
 from attrs import define, field
 from time import time
@@ -15,12 +16,12 @@ from urllib.parse import urlparse
 from html2text import HTML2Text
 
 from mastodon import Mastodon, streaming
-from common import db
-from common.types import minimalStatus, listenerStats
+from common import db_sqlite
+from common.ap_types import minimalStatus, listenerStats
 
 parser = argparse.ArgumentParser(prog="as:Public Standalone Collector")
 parser.add_argument('mode', choices=["run", "test"])
-parser.add_argument('--db', default=db.default_dbpath, help="Use/create sqlite3 database at this location")
+parser.add_argument('--db', default=db_sqlite.default_dbpath, help="Use/create sqlite3 database at this location")
 parser.add_argument('-r', '--recorder', action='append', default=[],
                     help="Push statuses to the recorder at this hostname.")
 parser.add_argument('-s', '--server', action='append', default=[],
@@ -127,13 +128,47 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
 class sink:
     mapstatuses: bool = field(default=False, kw_only=True)
     minFlushFreq: int = field(default=30, kw_only=True)
-    maxFlushFreq: int = field(default=300, kw_only=True)
+    maxFlushFreq: int = field(default=60, kw_only=True)
     lastflushed: int = field(default=0, init=False)
     missed: set = field(default=set(), init=False)
-    busy: set = field(default=False, init=False)
+    busy: bool = field(default=False, init=False)
 
-    async def flush(self, statuses: dict):
-        pass
+    async def flush(self, statuses: tuple, *args, **kwargs):
+        if self.busy:
+            if self.mapstatuses:
+                if "statusmap" not in kwargs:
+                    raise AttributeError("statusmap is required for a sink with mapstatuses=True")
+            self.missed.update(statuses)
+            return
+
+        try:
+            self.busy = True
+
+            if self.missed:
+                push_statuses = tuple(set(statuses) | self.missed)
+            else:
+                push_statuses = statuses
+
+            statuses_flushed = await self._flush(push_statuses, *args, **kwargs)
+
+            if statuses_flushed:
+                if self.missed:
+                    self.missed -= statuses_flushed
+            if statuses_flushed != push_statuses:
+                self.missed.update(set(statuses) - set(statuses_flushed))
+            log.debug("Sink %s flush finished. Sink backlog size is %i" % (type(self), len(self.missed)))
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug("%s flush failed due to %s." % (type(self), repr(e)))
+        finally:
+            # Assume push failed, add statuses to backlog
+            self.missed.update(statuses)
+            self.busy = False
+
+    async def _flush(self, statuses: tuple, *args, **kwargs):
+        return ()
 
     def flushable(self):
         if self.busy:
@@ -152,9 +187,9 @@ class sqlitesink(sink):
     mapstatuses: bool = field(default=True, kw_only=True)
     minFlushFreq: int = field(default=60, kw_only=True)
 
-    async def flush(self, statuses: tuple):
+    async def _flush(self, statuses: tuple, *args, **kwargs):
         begints = time()
-        await db.batchwrite(statuses[1], self.dbpath)
+        await db_sqlite.batchwrite(statuses[1], self.dbpath)
         log.info("Flushed %i statuses, took %i ms." % (len(statuses[1]), int((time() - begints) * 1000)))
 
 
@@ -163,8 +198,8 @@ class recordersink(sink):
     recorderuri: str
     mapstatuses: bool = field(default=True, kw_only=True)
 
-    async def flush(self, statuses: tuple):
-        payload = zstd.ZSTD_compress(msgpack.dumps(statuses))
+    async def _flush(self, statuses: tuple, *args, **kwargs):
+        payload = zstd.ZSTD_compress(msgpack.dumps((kwargs["statusmap"], statuses)))
         r = await httpsession.post('%s/api/recorder/checkin' % self.recorderuri, data=payload)
 
 
@@ -356,9 +391,9 @@ async def flushtosinks():
         log.debug("[flushtosinks] Flushing to %s" % type(sinktoflush))
         try:
             if sinktoflush.mapstatuses:
-                await sinktoflush.flush(mappedstatuses)
+                await sinktoflush.flush(statuses=mappedstatuses, statusmap=statusmap)
             else:
-                await sinktoflush.flush(flushable_statuses.copy())
+                await sinktoflush.flush(statuses=flushable_statuses)
             sinktoflush.lastflushed = int(time())
         except asyncio.CancelledError:
             raise
@@ -369,20 +404,20 @@ async def flushtosinks():
     # Only push if any sinks have passed their max time between flushes
     if any([i.needs_flushed() for i in flushable_sinks]):
         log.debug("[flushtosinks] Flushing to eligible sinks...")
-        flushable_statuses = unsent_statuses.copy()
+        flushable_statuses = tuple(unsent_statuses.values())
 
         # Only generate mapped statuses if any sinks use them
         if any([i.mapstatuses for i in flushable_sinks]):
             # I thought there was a way to just get the values out as a tuple, like with the slots
             # This probably is hilariously wasteful and likely ain't worth the bandwidth gain
             statusmap = minimalStatus.__slots__[:-1]
-            mappedstatuses = (statusmap, tuple([tuple([getattr(i, value) for value in statusmap]) for i in flushable_statuses.values()]))
+            mappedstatuses = tuple([tuple([getattr(i, value) for value in statusmap]) for i in flushable_statuses])
 
         for i in flushable_sinks:
             asyncio.create_task(flush(i))
 
         for i in flushable_statuses:
-            del(unsent_statuses[i])
+            del(unsent_statuses[i.url])
 
 
 def mkmpy(domain):
@@ -544,12 +579,11 @@ async def collectorLoop(domains):
                 c.clear()
                 statusScreen(c)
 
-            if lastflush + 30 < time():
+            if lastflush + 15 < time():
                 if len(unsent_statuses):
                     await flushtosinks()
                 lastflush = time()
 
-                log.debug("Pruning dedupe cache")
                 ts = int(time())
                 for i in [k for k, v in dedupe.items() if v + 600 < ts]:
                     del dedupe[i]
@@ -574,14 +608,25 @@ async def collectorLoop(domains):
             await flushtosinks()
             raise
 
+        except Exception as e:
+            print("(Crash.) In a wrinkle of steel we are gone.")
+            tbpath = "error-collector-%s.log" % datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+            traceback.print_tb(e.__traceback__, file=open(tbpath, "w"))
+            if args.debug:
+                traceback.print_tb(e.__traceback__)
+            else:
+                print("A log of this error (Type %s) is at %s" % (repr(e), tbpath))
+            exit()
+
 
 def buildListFromArgs(direct, lists, nocsv=False):
-    items = set([i for i in direct])
+    items = set(direct)
     for file in lists:
         if nocsv:
             items.update([i.strip() for i in open(file).readlines()])
         else:
             items.update([i.strip().split(',')[0] for i in open(file).readlines()])
+    items.discard('')
     return list(items)
 
 
@@ -703,7 +748,7 @@ if __name__ == '__main__':
 
     if args.mode == "run":
         log = logSetup()
-        db.checkdb(args.db)
+        db_sqlite.checkdb(args.db)
 
         sinks = []
         sinks.append(sqlitesink(args.db))

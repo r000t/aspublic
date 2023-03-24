@@ -3,18 +3,20 @@ from typing import List, Optional, Union
 from pydantic import BaseModel, Field, HttpUrl, AnyUrl
 from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
+from attrs import define
+from re import findall
 from time import time
 from datetime import datetime, date
-from common import db
+from common import db_sqlite
 app = FastAPI(title="as:Public Viewer", version="0.1.5")
 
 ## Path to status database from a Collector
 #dbpath = 'statuses.sqlite3'
-dbpath = db.default_dbpath
+dbpath = db_sqlite.default_dbpath
 
 ## Set to True to serve static files from the application. You'll need to do that to run it locally.
 ## If you're running this even semi-publicly, see the README for a sample nginx configuration.
-mountLocalDirectory = False
+mountLocalDirectory = True
 
 
 class StatusModel(BaseModel):
@@ -35,6 +37,41 @@ class DebugModel(BaseModel):
 class ResultModel(BaseModel):
     results: List[StatusModel] = Field(description="The actual list of search results")
     debug: Optional[DebugModel] = Field(description="Optional information helpful for debugging and performance tuning")
+
+
+@define
+class searchBackend():
+    def translateSearchString(self, searchString):
+        query = searchString
+        and_query = searchString[:]
+
+        not_ops = ['!', '-']
+        not_ops_re = '|'.join(not_ops)
+        not_query = []
+        for spair in [(r'[%s]"[^"]*"', '"'), (r'[%s]\w+', '')]:
+            res = findall(spair[0] % not_ops_re, query)
+            for q in res:
+                and_query = and_query.replace(q, '')
+                not_query.append(q.strip(''.join(not_ops)).strip('"'))
+
+        phrase_query = findall(r'"([^"]*)"', and_query)
+        for q in phrase_query:
+            and_query = and_query.replace('"%s"' % q, '')
+
+        and_query = [answer.strip() for answer in and_query.split()]
+        phrase_query = [answer.strip() for answer in phrase_query]
+        not_query = [answer.strip(' %s\n' % ''.join(not_ops)) for answer in not_query]
+
+        return and_query, phrase_query, not_query
+
+    async def search(self, searchString, *args, **kwargs):
+        and_query, phrase_query, not_query = self.translateSearchString(searchString)
+        return self._search(and_query, phrase_query, not_query, *args, **kwargs)
+
+    async def _search(self, and_query, phrase_query, not_query, *args, **kwargs):
+        pass
+
+
 
 
 @app.get("/api/unstable/search", response_model=ResultModel)

@@ -15,7 +15,12 @@ aiohttp_socks
 #Need aiologger from github because we need commits that happened in Nov/Dec 2022. Pip release is from Oct 2022.
 aiologger @ git+https://github.com/async-worker/aiologger@385a86301a5a1d6d592c9732b5324ca2796c61dc#aiologger[aiofiles]
 
+#Only needed for using postgresql
+sqlalchemy
+asyncpg
+
 #Only needed for using the Viewer or Recorder
+toml
 fastapi
 uvicorn[standard]
 python-multipart

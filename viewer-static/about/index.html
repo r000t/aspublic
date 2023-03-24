@@ -10,20 +10,25 @@
     <h2><a href="/">Return Home</a></h2>
 <br />
     <h2>How does it work?</h2>
-    <p>as:Public currently uses two components.</p>
+    <p>as:Public is made up of three components.</p>
     <p>A <b>Collector</b> connects to instance public ("Federated") Streaming API endpoints.
     Mastodon provides this Federated feed for discovery tools, such as this one.
     Mastodon pushes all public statuses to anybody connected to this endpoint. This includes statuses that were sent to it by other instances.
     It does <b>not</b> include statuses that are Unlisted, Followers-Only, or Private/DM.
     The Collector stores these statuses in a portable file, for storage or for use with a Display.
+    It can also be configured to push statuses to a centralized <b>Recorder</b>.
     Because we wait for servers to push data to us, we use virtually zero resources on their end.</p>
     <p>A <b>Display</b> (the backend for this website) allows lookups against the files the Collector produces.
     It is designed to be run on a machine separate from the collector. The Display software exposes an API that any application can use.
     The garbage-tier HTML frontend I've written uses this API.</p>
-    <p>A third component is planned that receives information from multiple collectors, and writes them to a database server such as Postgres.</p>
+    <p>A <b>Recorder</b> provides a central target for multiple Collectors, and provides more advanced features for maintaining stored statuses.
+    It enables the use of "real" database software such as postgresql.
+    Statuses are sent in compressed batches to the Recorder.
+    This method allows Collectors across the Internet, potentially run by untrusted people, to safely and efficiently share a database.
+    </p>
 <br />
     <h2>Can I run my own?</h2>
-    <p>The source code for all components will be released in the coming weeks.
+    <p>as:Public is free and open source software. You are encouraged to <a href="/aspublic-latest.tar">inspect the source code</a> and run it yourself.
     The software is lightweight, and can run on any spare computer, project board, or VPS.
     It is recommended that you run the Collector and Display on separate machines, with separate Internet connections.</p>
 <br />
@@ -37,6 +42,37 @@
     <p>While this will prevent the Collector from subscribing to your instance, it will <b>not</b> prevent ingest from other instances.
     Your instance sends a copy of every status to each instance at which the author has at least one follower.
     The Collector will still be able to ingest statuses that it sees from other servers.</p>
+<br />
+    <h2>The feds can use your search engine!</h2>
+    <p>Anything that can be reasonably called a government agency, really anywhere in the world, could have written this software with 30 days of lead time.
+    If the NSA, MI5 or FSB didn't perform bulk data collection before November 2022, they sure as shit do it now that everyone's leaving Twitter.</p>
+    <p>I cannot stress this enough; as:Public is not a feat of engineering. It should not impress you.
+    The only thing I have brought to the table is that I can't be bullied into taking my search engine down.</p>
+    <p>The very nice lady from the FBI that you guys sent also confirmed that yes, they're already watching fedi, with their own tools.</p>
+    <p>It is common to harass and bully anybody who makes or asks for a fediverse search engine.
+    The rationale given is that, if they are bullied into taking down their search engine, then bad actors will be deprived of the tool.
+    It should be fairly obvious that this provides a false sense of security.
+    If somebody believes this, and subsequently posts something publicly thinking that it is private, <b>then they have been set up for failure, by people who lied to them about their health and safety</b>.
+    The cat isn't just out of the bag, there never was a bag to begin with. Bullying and harassing people won't change that.</p>
+<br />
+    <h2>Why's it called as:Public?</h2>
+    <p>This term is from the ActivityPub standard that is used by Fediverse software.
+    Activities (statuses in our case) must be addressed to somebody.
+    This could be a specific object, such as a user. It could also be a group of users, or in ActivityPub parlance, a collection.
+    One such collection is called "https://www.w3.org/ns/activitystreams#Public", which can be shortened to as:Public.
+    Mere discussion of maybe hinting at the possibility of potentially thinking about planning to make a fediverse search engine causes untold amounts of drama.
+    For this reason, I wanted to remind everybody as often as possible that only public statuses are collected.</p>
+    <p>Even so, people have felt it necessary to contact the FBI over a fediverse search engine. You'll notice it's still here.</p>
+<br />
+    <h2>The domain says something different...</h2>
+    <p>This is an "instance" of as:Public. Please keep in mind that this is entirely separate from ActivityPub instances.
+    There is no way to connect to any part of as:Public directly with ActivityPub software such as Mastodon. It does not federate.</p>
+    <p>"stealthWard" was a working name for the as:Public Collector.
+    This is a reference to a League of Legends item that allows you to see through the fog-of-war at the location you place it.
+    The item, once placed, is not visible. The Collector, similarly, appears as a single streaming API connection in httpd logs.
+    Instance administrators that are hostile to search engines look for scrapers, which cause large amounts of log noise.
+    To them, the Collector is a stealth ward.
+    The instance admin can't immediately see something scraping statuses, and so they operate under the foolish assumption that nobody can see their public statuses that they posted publicly.
 </div>
 </body>
 </html>

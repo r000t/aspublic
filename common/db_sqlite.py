@@ -2,10 +2,11 @@ import sqlite3
 import aiosqlite
 from re import compile
 from datetime import datetime, date
-from .types import minimalStatus
+from .ap_types import minimalStatus
 
 default_dbpath = "statuses.sqlite3"
 validDomain = compile("^(((?!\-))(xn\-\-)?[a-z0-9\-_]{0,61}[a-z0-9]{1,1}\.)*(xn\-\-)?([a-z0-9\-]{1,61}|[a-z0-9\-]{1,30})\.[a-z]{2,}$")
+
 
 def checkdb(dbpath=default_dbpath):
     from os import path
