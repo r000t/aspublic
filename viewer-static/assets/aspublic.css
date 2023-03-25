@@ -15,15 +15,12 @@ body {
   background-color: #424242;
 }
 
-div.f0 {
-  max-width: 1200px;
-  margin: auto;
-}
-
 input.results-searchbox {
   width: 500px;
   height: 30px;
   font-size: 14pt;
+  left: 5%;
+  position: relative;
 }
 
 input.home-searchbox {
@@ -43,9 +40,24 @@ select.home-selector {
   font-size:14pt;
 }
 
+img.banner-logo { padding: 30px; }
+
+
+div.f0 {
+  max-width: 1200px;
+  margin: auto;
+}
+
 div.results-container {
   max-width: 1200px;
   margin: auto;
+}
+
+div.banner-flexbox {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  position: relative;
 }
 
 div.result {
@@ -53,6 +65,12 @@ div.result {
   padding: 15px;
   border-style: solid;
   border-color: #808080;
+}
+
+@media screen and (max-width:1000px) {
+  .div.banner-flexbox { flex: 0 1 50% }
+  .img.banner-logo { flex-basis: 100%; align: center; }
+  .input.results-searchbox{ width: 50%; align: center; }
 }
 
 p, h1, h2, h3, h4, h5, h6, ul, td, span {

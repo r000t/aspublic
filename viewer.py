@@ -16,7 +16,7 @@ backend = 'postgres'
 ## Path to status database from a Collector, or postgres URI
 #dbpath = 'statuses.sqlite3'
 #dbpath = 'username:password@host:port/database'
-dbpath = db_sqlite.default_dbpath
+dbpath = "aspublic:snivel-chanson-knot-brunet-phone@10.72.8.32:5432/aspublic"
 
 ## Set to True to serve static files from the application. You'll need to do that to run it locally.
 ## If you're running this even semi-publicly, see the README for a sample nginx configuration.
@@ -34,8 +34,15 @@ class StatusModel(BaseModel):
     attachments: bool = Field(False, description="Whether the status had any media attachments")
 
 
+class QueryModel(BaseModel):
+    and_terms: List[str] = Field(description="Individual terms that must appear in at least one field being searched")
+    and_phrases: List[str] = Field(description="Multiword phrases that must appear, in the given order, in at least one field being searched")
+    not_terms: List[str] = Field(description="Individual terms that must not appear in any field being searched")
+
+
 class DebugModel(BaseModel):
     dbtime_ms: Optional[int] = Field(description="The time taken for the database query to finish, in ms")
+    query: Optional[QueryModel] = Field(description="The query that was presented to the search backend, after parsing")
 
 
 class ResultModel(BaseModel):
@@ -73,7 +80,8 @@ class searchBackend:
 
     async def search(self, searchString, *args, **kwargs):
         and_query, phrase_query, not_query = self.translateSearchString(searchString)
-        return self._search(and_query, phrase_query, not_query, *args, **kwargs)
+        res = await self._search(and_query, phrase_query, not_query, *args, **kwargs)
+        return res, (and_query, phrase_query, not_query)
 
     async def _search(self, and_query, phrase_query, not_query, *args, **kwargs):
         pass
@@ -106,16 +114,20 @@ async def read_item(q: str = Query(title="Single search term to look for in stat
     \n\nbots, replies, and attachments fields are optional. If they are not specified, or null, all posts are shown.
     If True, **only** that type of post will be shown. If False, that type of post will **not** be shown."""
     begints = time()
-    results = await db.search(q=q,
-                              domain=domain,
-                              bots=bots,
-                              replies=replies,
-                              attachments=attachments,
-                              limit=limit,
-                              before=before,
-                              after=after)
+    results, parsedquery = await db.search(searchString=q,
+                                           domain=domain,
+                                           bots=bots,
+                                           replies=replies,
+                                           attachments=attachments,
+                                           limit=limit,
+                                           before=before,
+                                           after=after)
 
-    return {"results": results, "debug": {"dbtime_ms": int(((time() - begints) * 1000))}}
+    print(parsedquery)
+
+    return {"results": results,
+            "debug": {"dbtime_ms": int(((time() - begints) * 1000)),
+                      "query": dict(zip(["and_terms", "and_phrases", "not_terms"], parsedquery))}}
 
 
 @app.on_event("startup")

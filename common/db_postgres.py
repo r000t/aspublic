@@ -1,6 +1,6 @@
 import asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from re import compile
 from datetime import datetime, date
 from .ap_types import minimalStatus
@@ -44,7 +44,8 @@ async def search(dbpath,
                  limit: int = 50,
                  before: datetime = None,
                  after: datetime = None):
-    async with connect(dbpath) as db:
+    engine = await connect(dbpath)
+    async with engine.connect() as db:
         optionmap = ((bots, 'bot'),
                      (replies, 'reply'),
                      (attachments, 'attachments'))
@@ -54,9 +55,9 @@ async def search(dbpath,
             if arg is None:
                 continue
             elif arg is False:
-                options += ' %s = 0 AND' % field
+                options += ' %s = False AND' % field
             elif arg:
-                options += ' %s = 1 AND' % field
+                options += ' %s = True AND' % field
 
         if before is not None:
             if type(before) is date:
@@ -92,31 +93,42 @@ async def search(dbpath,
 
             options += (' url LIKE "%s%%/%%" AND' % domain)
 
+        # Phrases aren't handled by postgres; Treat like a multiword AND, enforce exact order later
         tsparams = ''
+        print("phrase %s" % phrase_query)
         if not and_query:
-            if phrase_query:
-                # Phrases aren't handled by postgres; Treat like a multiword AND, enforce exact order later
-                for i in phrase_query:
-                    tsparams += ' &'.join(phrase_query)
-            else:
+            if not phrase_query:
                 return []
-        else:
-            for i in and_query:
-                tsparams += '%s &' % i
-            for i in not_query:
-                tsparams += '!(%s) &'
-        tsparams.rstrip('&')
-
-        # THIS IS TESTING CODE AND IT'S ALMOST CERTAINLY VULNERABLE.
-        # 0.1.6 won't release like this, but this comment is here for people viewing git history.
-        # IF YOU USE THIS CODE IN PRODUCTION, YOU WILL ALMOST CERTAINLY GET OWNED.
-        # THIS CODE IS VULNERABLE TO SQL INJECTION. DO NOT USE IT.
-        psqlquery = "SELECT * FROM statuses WHERE %s ts_text @@ to_tsquery(%s) ORDER BY created DESC;" % (options, tsparams)
-        print(psqlquery)
+        for i in and_query:
+            tsparams += '%s &' % i
+        for i in phrase_query:
+            tsparams += ' &'.join(i.split(' '))
+            tsparams += ' &'
+        for i in not_query:
+            tsparams += '!(%s) &' % i
+        tsparams = tsparams.strip('&')
 
         results = []
-        async with db.execute(psqlquery, ('"%s"' % tsparams,)) as cursor:
-            async for row in cursor:
+        fetches = 0
+        while fetches < 5:
+            fetches += 1
+            # THIS IS TESTING CODE AND IT'S ALMOST CERTAINLY VULNERABLE.
+            # 0.1.6 won't release like this, but this comment is here for people viewing git history.
+            # IF YOU USE THIS CODE IN PRODUCTION, YOU WILL ALMOST CERTAINLY GET OWNED.
+            # THIS CODE IS VULNERABLE TO SQL INJECTION. DO NOT USE IT.
+            psqlquery = "SELECT * FROM statuses WHERE %s ts_text @@ to_tsquery('%s') ORDER BY created + 1 DESC LIMIT %s;" % (options, tsparams, int(limit))
+            print(psqlquery)
+
+            psqlres = await db.execute(text(psqlquery))
+            if not psqlres:
+                # No new results after refetching
+                return results
+
+            for row in psqlres:
+                if any([i.lower() not in row[1].lower() for i in phrase_query]):
+                    print("Phrase not in text. Bailing.")
+                    continue
+
                 results.append(minimalStatus(url="https://" + row[0],
                                              text=row[1],
                                              subject=row[2],
@@ -126,4 +138,9 @@ async def search(dbpath,
                                              reply=row[6],
                                              attachments=row[7]).getdict())
 
-        return results
+                if len(results) == limit:
+                    return results
+
+            #TODO: Set up new query
+            #if not phrase_query:
+            return results

@@ -7,12 +7,13 @@
     <link rel="stylesheet" type="text/css" href="/assets/aspublic.css">
 </head>
 <body>
-    <div style="display: flex; align-items: center;">
-        <a href="/"><img src="/assets/logo.png" height="75px" style="padding: 30px;"/></a>
-        <div style="width: 5%;"></div>
+    <div class="banner-flexbox">
+        <a href="/"><img class="banner-logo" src="/assets/logo.png" height="75px"/></a>
         <form action="/search" method="get">
             <input type="text" class="results-searchbox" id="results-searchbox" name="q"></form>
+        <div style="float: right; "></div>
     </div>
+    <h3 id="result-stats" style="left: 30px; position: relative;">Waiting...</h3>
     <div class="results-container"></div>
     <script src="search.js"></script>
 </body>
