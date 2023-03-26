@@ -1,5 +1,5 @@
 import asyncio
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from re import compile
 from datetime import datetime, date
@@ -50,15 +50,18 @@ async def search(dbpath,
                      (replies, 'reply'),
                      (attachments, 'attachments'))
 
-        options = ''
+
+
+        staticoptions = ''
         for arg, field in optionmap:
             if arg is None:
                 continue
             elif arg is False:
-                options += ' %s = False AND' % field
+                staticoptions += ' %s = True AND' % field
             elif arg:
-                options += ' %s = True AND' % field
+                staticoptions += ' %s = False AND' % field
 
+        options = {}
         if before is not None:
             if type(before) is date:
                 before = datetime.combine(before, datetime.min.time())
@@ -68,7 +71,7 @@ async def search(dbpath,
                 raise "No."
             ts = int(before.timestamp())
 
-            options += ' created < %s AND' % before.timestamp()
+            options['before'] = (' created < %s AND', before.timestamp())
 
         if after is not None:
             if type(after) is date:
@@ -79,7 +82,7 @@ async def search(dbpath,
                 raise "No."
             ts = int(after.timestamp())
 
-            options += ' created > %s AND' % after.timestamp()
+            options['after'] = ('created > %s AND', after.timestamp())
 
         if domain:
             domain = domain.strip().lstrip("https://").strip("/").lower()
@@ -91,42 +94,57 @@ async def search(dbpath,
                 if i in domain:
                     raise "No."
 
-            options += (' url LIKE "%s%%/%%" AND' % domain)
+            options['domain'] = (' url LIKE "%s%%/%%" AND', domain)
 
         # Phrases aren't handled by postgres; Treat like a multiword AND, enforce exact order later
-        tsparams = ''
+        tsparams = []
         print("phrase %s" % phrase_query)
         if not and_query:
             if not phrase_query:
                 return []
         for i in and_query:
-            tsparams += '%s &' % i
+            tsparams.append(('%s', i))
         for i in phrase_query:
-            tsparams += ' &'.join(i.split(' '))
-            tsparams += ' &'
+            tsparams.extend([('%s', word) for word in i.split(' ')])
         for i in not_query:
-            tsparams += '!(%s) &' % i
-        tsparams = tsparams.strip('&')
+            tsparams.append(('!(%s)', i))
+        #tsparams = tsparams.strip('&')
+
+        # Because of how queries are currently performed, (get *all* results, sort by date)
+        # preventing another round-trip to fetch more results is greatly preferred
+        if phrase_query:
+            psqllimit = limit * 2
+        else:
+            psqllimit = limit
 
         results = []
         fetches = 0
         while fetches < 5:
             fetches += 1
-            # THIS IS TESTING CODE AND IT'S ALMOST CERTAINLY VULNERABLE.
-            # 0.1.6 won't release like this, but this comment is here for people viewing git history.
-            # IF YOU USE THIS CODE IN PRODUCTION, YOU WILL ALMOST CERTAINLY GET OWNED.
-            # THIS CODE IS VULNERABLE TO SQL INJECTION. DO NOT USE IT.
-            psqlquery = "SELECT * FROM statuses WHERE %s ts_text @@ to_tsquery('%s') ORDER BY created + 1 DESC LIMIT %s;" % (options, tsparams, int(limit))
-            print(psqlquery)
 
-            psqlres = await db.execute(text(psqlquery))
+            print(tsparams)
+            optionstext = staticoptions + ''.join([snippet[0] % f":{tag}" for tag, snippet in options.items()])
+            print(optionstext)
+            tstext = ' &'.join([snippet[0] % f":x{tag}" for tag, (snippet) in enumerate(tsparams)])
+            print(tstext)
+
+            #psqlquery = "SELECT * FROM statuses WHERE %s ts_text @@ to_tsquery('%s') ORDER BY created + 1 DESC LIMIT %s;" % (options, tsparams, int(psqllimit))
+            psqltext = f"SELECT * FROM statuses WHERE {optionstext} ts_text @@ to_tsquery('{tstext}') ORDER BY created + 1 LIMIT {psqllimit}"
+
+            boundparams = [bindparam(tag, value[1]) for tag, value in options.items()]
+            print(boundparams)
+            boundparams.extend([bindparam(f"x{tag}", value[1]) for tag, value in enumerate(tsparams)])
+            print(psqltext)
+            print(boundparams)
+            psqlquery = text(psqltext).bindparams(*boundparams)
+
+            psqlres = await db.execute(psqlquery)
             if not psqlres:
                 # No new results after refetching
                 return results
 
             for row in psqlres:
                 if any([i.lower() not in row[1].lower() for i in phrase_query]):
-                    print("Phrase not in text. Bailing.")
                     continue
 
                 results.append(minimalStatus(url="https://" + row[0],
