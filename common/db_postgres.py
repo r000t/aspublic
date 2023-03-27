@@ -9,7 +9,7 @@ validDomain = compile("^(((?!\-))(xn\-\-)?[a-z0-9\-_]{0,61}[a-z0-9]{1,1}\.)*(xn\
 
 
 async def connect(dbpath):
-    engine = create_async_engine("postgresql+asyncpg://" + dbpath)
+    engine = create_async_engine("postgresql+asyncpg://" + dbpath, echo=True)
     return engine
 
 
@@ -57,9 +57,9 @@ async def search(dbpath,
             if arg is None:
                 continue
             elif arg is False:
-                staticoptions += ' %s = True AND' % field
-            elif arg:
                 staticoptions += ' %s = False AND' % field
+            elif arg:
+                staticoptions += ' %s = True AND' % field
 
         options = {}
         if before is not None:
@@ -125,20 +125,21 @@ async def search(dbpath,
             print(tsparams)
             optionstext = staticoptions + ''.join([snippet[0] % f":{tag}" for tag, snippet in options.items()])
             print(optionstext)
-            tstext = ' &'.join([snippet[0] % f":x{tag}" for tag, (snippet) in enumerate(tsparams)])
+            tstext = ' &'.join([snippet[0] % "\\\\\\:x%s\\" % str(tag) for tag, (snippet) in enumerate(tsparams)])
             print(tstext)
 
-            #psqlquery = "SELECT * FROM statuses WHERE %s ts_text @@ to_tsquery('%s') ORDER BY created + 1 DESC LIMIT %s;" % (options, tsparams, int(psqllimit))
-            psqltext = f"SELECT * FROM statuses WHERE {optionstext} ts_text @@ to_tsquery('{tstext}') ORDER BY created + 1 LIMIT {psqllimit}"
+            psqltext = f"SELECT * FROM statuses WHERE {optionstext} ts_text @@ phrase_to_tsquery(:q) ORDER BY created + 1 LIMIT {psqllimit};"
 
             boundparams = [bindparam(tag, value[1]) for tag, value in options.items()]
             print(boundparams)
-            boundparams.extend([bindparam(f"x{tag}", value[1]) for tag, value in enumerate(tsparams)])
+            boundparams.extend([bindparam(f"x{tag}", value=value[1]) for tag, value in enumerate(tsparams)])
             print(psqltext)
             print(boundparams)
-            psqlquery = text(psqltext).bindparams(*boundparams)
+            psqlquery = text(psqltext)
+            print("...")
+            print(psqlquery.bindparams(*boundparams).compile(db, compile_kwargs={"literal_binds": True}))
 
-            psqlres = await db.execute(psqlquery)
+            psqlres = await db.execute(psqlquery.bindparams(*boundparams))
             if not psqlres:
                 # No new results after refetching
                 return results
