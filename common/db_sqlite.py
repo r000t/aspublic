@@ -51,7 +51,7 @@ async def batchwrite(values: list, dbpath):
 
 
 async def search(dbpath,
-                 q: str,
+                 and_query, phrase_query, not_query,
                  domain: str = None,
                  bots: bool = None,
                  replies: bool = None,
@@ -107,12 +107,21 @@ async def search(dbpath,
 
             options += (' url LIKE "%s%%/%%" AND' % domain)
 
+        ftsquery = ''
+        for i in and_query:
+            ftsquery += f' {i} AND'
+        for phrase in phrase_query:
+            ftsquery += f' "{phrase}" AND'
+        ftsquery = ftsquery.removesuffix('AND')
+        for i in not_query:
+            ftsquery += f' NOT {i}'
+
         # As a reminder to anybody reading this code...
         # PUTTING VARIABLES INTO A SQL QUERY WITHOUT USING PARAMETERIZATION (the ?s) IS AMAZINGLY, SPECTACULARLY, UNIMAGINABLY DANGEROUS.
         # Don't use this as an example for your own code. I'm a professional, and I know what I'm doing. Now, hold my joint.
         sqlitequery = 'SELECT * FROM statuses t JOIN fts_status f ON t.ROWID = f.ROWID WHERE %s fts_status MATCH ? ORDER BY created DESC LIMIT %i;' % (options, int(limit))
         results = []
-        async with db.execute(sqlitequery, ('"%s"' % q,)) as cursor:
+        async with db.execute(sqlitequery, (ftsquery,)) as cursor:
             async for row in cursor:
                 results.append(minimalStatus(url="https://" + row[0],
                                              text=row[1],

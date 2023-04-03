@@ -1,0 +1,8 @@
+# Change db_backend to "sqlite" or "postgres", and change the path to match your setup.
+
+[database]
+db_backend  = ""
+#db_url	    = "user:password@address:port/database"
+#db_url	    = "statuses.sqlite3"
+
+

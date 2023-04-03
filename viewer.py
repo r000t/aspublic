@@ -1,4 +1,5 @@
 import asyncio
+import toml
 from typing import List, Optional, Union
 from pydantic import BaseModel, Field, HttpUrl, AnyUrl
 from fastapi import FastAPI, Query
@@ -8,19 +9,22 @@ from re import findall
 from time import time
 from datetime import datetime, date
 from common import db_sqlite, db_postgres
-app = FastAPI(title="as:Public Viewer", version="0.1.5")
+app = FastAPI(title="as:Public Viewer", version="0.1.6")
 
-## Backend to use, either 'sqlite' or 'postgres'
-backend = 'postgres'
-
-## Path to status database from a Collector, or postgres URI
-#dbpath = 'statuses.sqlite3'
-#dbpath = 'username:password@host:port/database'
-dbpath = "aspublic:snivel-chanson-knot-brunet-phone@10.72.8.32:5432/aspublic"
+# Path to config file
+config_path = "viewer.toml"
 
 ## Set to True to serve static files from the application. You'll need to do that to run it locally.
 ## If you're running this even semi-publicly, see the README for a sample nginx configuration.
-mountLocalDirectory = True
+mountLocalDirectory = False
+
+
+try:
+    with open(config_path, "r") as f:
+        config = toml.load(f)
+except FileNotFoundError:
+    print("Couldn't find configuration at %s" % config_path)
+    exit()
 
 
 class StatusModel(BaseModel):
@@ -53,6 +57,7 @@ class ResultModel(BaseModel):
 @define
 class searchBackend:
     path: str
+    parsequery: bool = field(default=False, kw_only=True)
 
     @staticmethod
     def translateSearchString(searchString):
@@ -78,10 +83,14 @@ class searchBackend:
 
         return and_query, phrase_query, not_query
 
-    async def search(self, searchString, *args, **kwargs):
-        and_query, phrase_query, not_query = self.translateSearchString(searchString)
-        res = await self._search(and_query, phrase_query, not_query, *args, **kwargs)
-        return res, (and_query, phrase_query, not_query)
+    async def search(self, q, *args, **kwargs):
+            and_query, phrase_query, not_query = self.translateSearchString(q)
+            if self.parsequery:
+                res = await self._search(and_query, phrase_query, not_query, *args, **kwargs)
+            else:
+                res = await self._search(q, *args, **kwargs)
+
+            return res, (and_query, phrase_query, not_query)
 
     async def _search(self, and_query, phrase_query, not_query, *args, **kwargs):
         pass
@@ -89,6 +98,8 @@ class searchBackend:
 
 @define
 class sqliteSearchBackend(searchBackend):
+    parsequery: bool = field(default=True, kw_only=True)
+
     async def _search(self, and_query, phrase_query, not_query, *args, **kwargs):
         res = await db_sqlite.search(self.path, and_query, phrase_query, not_query, **kwargs)
         return res
@@ -96,13 +107,13 @@ class sqliteSearchBackend(searchBackend):
 
 @define
 class postgresSearchBackend(searchBackend):
-    async def _search(self, and_query, phrase_query, not_query, *args, **kwargs):
-        res = await db_postgres.search(self.path, and_query, phrase_query, not_query, *args, **kwargs)
+    async def _search(self, q, *args, **kwargs):
+        res = await db_postgres.search(self.path, q, *args, **kwargs)
         return res
 
 
 @app.get("/api/unstable/search", response_model=ResultModel)
-async def read_item(q: str = Query(title="Single search term to look for in status text/body"),
+async def read_item(q: str = Query(title="Search query with standard operators"),
                     domain: str = Query(default=None, title="Return only results from this domain"),
                     bots: bool = None,
                     replies: bool = None,
@@ -110,11 +121,11 @@ async def read_item(q: str = Query(title="Single search term to look for in stat
                     before: Union[datetime, date] = None,
                     after: Union[datetime, date] = None,
                     limit: int = Query(default=50, ge=1, le=100, title="Number of results to return")):
-    """Early search function. Case-insensitive. Does not support operators. Entire query is treated as a single term.
+    """Early search function. Case-insensitive. Standard search operators are supported.
     \n\nbots, replies, and attachments fields are optional. If they are not specified, or null, all posts are shown.
     If True, **only** that type of post will be shown. If False, that type of post will **not** be shown."""
     begints = time()
-    results, parsedquery = await db.search(searchString=q,
+    results, parsedquery = await db.search(q=q,
                                            domain=domain,
                                            bots=bots,
                                            replies=replies,
@@ -122,8 +133,6 @@ async def read_item(q: str = Query(title="Single search term to look for in stat
                                            limit=limit,
                                            before=before,
                                            after=after)
-
-    print(parsedquery)
 
     return {"results": results,
             "debug": {"dbtime_ms": int(((time() - begints) * 1000)),
@@ -134,10 +143,16 @@ async def read_item(q: str = Query(title="Single search term to look for in stat
 async def recorder_startup():
     global db
 
-    if backend.startswith('sqlite'):
-        db = sqliteSearchBackend(path=dbpath)
-    elif backend.startswith('postgres'):
-        db = postgresSearchBackend(path=dbpath)
+    dbconfig = config["database"]
+    if dbconfig["db_backend"].startswith("sqlite"):
+        db_sqlite.checkdb(dbconfig["db_url"])
+        db = sqliteSearchBackend(path=dbconfig["db_url"])
+    elif dbconfig["db_backend"].startswith("postgres"):
+        await db_postgres.checkdb(dbconfig["db_url"])
+        db = postgresSearchBackend(path=dbconfig["db_url"])
+    else:
+        print("Configuration Error: db_backend must be 'sqlite' or 'postgres'")
+        exit()
 
 
 if mountLocalDirectory:

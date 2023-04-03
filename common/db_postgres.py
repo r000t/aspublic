@@ -1,5 +1,5 @@
 import asyncio
-from sqlalchemy import text, bindparam
+from sqlalchemy import text, bindparam, String, Boolean, Integer
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from re import compile
 from datetime import datetime, date
@@ -9,7 +9,7 @@ validDomain = compile("^(((?!\-))(xn\-\-)?[a-z0-9\-_]{0,61}[a-z0-9]{1,1}\.)*(xn\
 
 
 async def connect(dbpath):
-    engine = create_async_engine("postgresql+asyncpg://" + dbpath, echo=True)
+    engine = create_async_engine("postgresql+asyncpg://" + dbpath)
     return engine
 
 
@@ -24,8 +24,11 @@ async def checkdb(dbpath):
     else:
         print("Connected to database, but tables don't exist. Creating...")
         async with engine.begin() as db:
-            await db.execute(text("CREATE TABLE statuses (url TEXT NOT NULL PRIMARY KEY, text TEXT, subject TEXT, created INT NOT NULL, language TEXT, bot boolean NOT NULL, reply boolean NOT NULL, attachments boolean NOT NULL)"))
-            await db.execute(text("CREATE INDEX statuses_created ON statuses (created)"))
+            await db.execute(text("CREATE TABLE statuses (url TEXT NOT NULL PRIMARY KEY, text TEXT, subject TEXT, created BIGINT NOT NULL, language TEXT, bot boolean NOT NULL, reply boolean NOT NULL, attachments boolean NOT NULL)"))
+            await db.execute(text("ALTER TABLE statuses ADD ts_text tsvector NULL GENERATED ALWAYS AS (to_tsvector('english'::regconfig, text)) STORED;"))
+            await db.execute(text("CREATE INDEX statuses_created ON statuses (created);"))
+            await db.execute(text("CREATE INDEX ts_created_idx ON statuses USING gin (created, ts_text);"))
+
         return True
 
 
@@ -35,8 +38,7 @@ async def batchwrite(values: list, dbpath):
         await db.execute(text("INSERT INTO statuses VALUES( :url, :text, :subject, :created, :language, :bot, :reply, :attachments) ON CONFLICT(url) DO NOTHING;"), values)
 
 
-async def search(dbpath,
-                 and_query, phrase_query, not_query,
+async def search(dbpath, q,
                  domain: str = None,
                  bots: bool = None,
                  replies: bool = None,
@@ -49,8 +51,6 @@ async def search(dbpath,
         optionmap = ((bots, 'bot'),
                      (replies, 'reply'),
                      (attachments, 'attachments'))
-
-
 
         staticoptions = ''
         for arg, field in optionmap:
@@ -85,69 +85,28 @@ async def search(dbpath,
             options['after'] = ('created > %s AND', after.timestamp())
 
         if domain:
-            domain = domain.strip().lstrip("https://").strip("/").lower()
-            # Less bulletproof anti-skid checks than before, and rn FastAPI is doing *no* validation.
+            domain = domain.strip().removeprefix("https://").strip("/").lower()
             if not validDomain.match(domain):
                 raise "No."
 
-            for i in ['/', ';', " ", "%", "&"]:
+            for i in ['/', ';', "%", "&"]:
                 if i in domain:
                     raise "No."
 
-            options['domain'] = (' url LIKE "%s%%/%%" AND', domain)
-
-        # Phrases aren't handled by postgres; Treat like a multiword AND, enforce exact order later
-        tsparams = []
-        print("phrase %s" % phrase_query)
-        if not and_query:
-            if not phrase_query:
-                return []
-        for i in and_query:
-            tsparams.append(('%s', i))
-        for i in phrase_query:
-            tsparams.extend([('%s', word) for word in i.split(' ')])
-        for i in not_query:
-            tsparams.append(('!(%s)', i))
-        #tsparams = tsparams.strip('&')
-
-        # Because of how queries are currently performed, (get *all* results, sort by date)
-        # preventing another round-trip to fetch more results is greatly preferred
-        if phrase_query:
-            psqllimit = limit * 2
-        else:
-            psqllimit = limit
+            options['domain'] = (" statuses.url LIKE %s AND", domain + '%%')
 
         results = []
         fetches = 0
         while fetches < 5:
             fetches += 1
 
-            print(tsparams)
             optionstext = staticoptions + ''.join([snippet[0] % f":{tag}" for tag, snippet in options.items()])
-            print(optionstext)
-            tstext = ' &'.join([snippet[0] % "\\\\\\:x%s\\" % str(tag) for tag, (snippet) in enumerate(tsparams)])
-            print(tstext)
-
-            psqltext = f"SELECT * FROM statuses WHERE {optionstext} ts_text @@ phrase_to_tsquery(:q) ORDER BY created + 1 LIMIT {psqllimit};"
-
+            psqltext = f"SELECT * FROM statuses WHERE {optionstext} ts_text @@ websearch_to_tsquery( :q ) ORDER BY created + 1 DESC LIMIT {int(limit)};"
             boundparams = [bindparam(tag, value[1]) for tag, value in options.items()]
-            print(boundparams)
-            boundparams.extend([bindparam(f"x{tag}", value=value[1]) for tag, value in enumerate(tsparams)])
-            print(psqltext)
-            print(boundparams)
-            psqlquery = text(psqltext)
-            print("...")
-            print(psqlquery.bindparams(*boundparams).compile(db, compile_kwargs={"literal_binds": True}))
+            psqlquery = text(psqltext).bindparams(*boundparams, bindparam("q", value=q))
 
-            psqlres = await db.execute(psqlquery.bindparams(*boundparams))
-            if not psqlres:
-                # No new results after refetching
-                return results
-
+            psqlres = await db.execute(psqlquery)
             for row in psqlres:
-                if any([i.lower() not in row[1].lower() for i in phrase_query]):
-                    continue
-
                 results.append(minimalStatus(url="https://" + row[0],
                                              text=row[1],
                                              subject=row[2],
@@ -157,9 +116,4 @@ async def search(dbpath,
                                              reply=row[6],
                                              attachments=row[7]).getdict())
 
-                if len(results) == limit:
-                    return results
-
-            #TODO: Set up new query
-            #if not phrase_query:
             return results

@@ -7,10 +7,21 @@ from fastapi import FastAPI, File, Body
 from time import time
 from common import db_sqlite, db_postgres
 from common.ap_types import minimalStatus
+app = FastAPI(title="as:Public Recorder", version="0.1.6")
 
-app = FastAPI(title="as:Public Recorder", version="0.1.5")
+# Path to config file
+config_path = "recorder.toml"
+
 dedupe = {}
 unflushed_statuses = {}
+
+
+try:
+    with open(config_path, "r") as f:
+        config = toml.load(f)
+except FileNotFoundError:
+    print("Couldn't find configuration at %s" % config_path)
+    exit()
 
 
 def process_filters(status: minimalStatus):
@@ -99,10 +110,7 @@ async def checkin(statuses: bytes = Body()):
 
 @app.on_event("startup")
 async def recorder_startup():
-    global config, dbconfig, filters
-
-    with open("recorder.toml", "r") as f:
-        config = toml.load(f)
+    global dbconfig, filters
 
     filters = {"policy": "accept", "reject": {}, "accept": {}}
     if "filters" in config:

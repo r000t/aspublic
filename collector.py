@@ -37,7 +37,7 @@ parser.add_argument("--exclude-regex", action='append', default=[],
 parser.add_argument("--exclude-regex-list", action='append', default=[],
                     help="Read regular expressions to drop from this list.")
 parser.add_argument('--useragent', type=str, help="HTTP User-Agent to present when opening connections",
-                    default="Collector/0.1.5")
+                    default="Collector/0.1.6")
 parser.add_argument('--discover', action="store_true", help="Automatically try to listen to new instances")
 parser.add_argument('--debug', action="store_true", help="Enable verbose output useful for debugging")
 parser.add_argument('--logdir', default="logs", help="Output debugging logs to this directory")

@@ -1,0 +1,19 @@
+# Change db_backend to "sqlite" or "postgres", and change the path to match your setup.
+
+[database]
+db_backend  = ""
+#db_url	    = "user:password@address:port/database"
+#db_url	    = "statuses.sqlite3"
+
+# Default action to take against statuses that do not match a filter
+filters.policy = "accept"
+[filters.reject]
+# Drop statuses that contain any of these regular expressions in their text body or subject/CW
+#regex        = ["example"]
+# Drop statuses that come from this domain, or any of its subdomains.
+#domain       = ["example.com", "example.net"]
+# Read these files for regular expressions to exclude, as if they were specified above
+#regex_files  = ["reject_regex.txt"]
+# Read these files for domains to exclude, as if they were specified above
+#domain_files = ["reject_domain.txt"]
+
