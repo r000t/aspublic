@@ -73,7 +73,7 @@ async function renderResults(urlParams) {
 
         html += `<br /><div class="result">
                            <h3>${i.subject}</h3><p>${escapeHtml(i.text)}</p>
-                           <a href="${res.url}">${i.url}</a><span style="float: right;">${i.created}</span></div>`;
+                           <a href="${i.url}">${i.url}</a><span style="float: right;">${i.created}</span></div>`;
     });
 
     let container = document.querySelector('.results-container');
