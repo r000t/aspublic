@@ -19,9 +19,18 @@ from mastodon import Mastodon, streaming
 from common import db_sqlite
 from common.ap_types import minimalStatus, listenerStats
 
+
+class dbDefaultAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values is None:
+            setattr(namespace, self.dest, db_sqlite.default_dbpath)
+        else:
+            setattr(namespace, self.dest, values)
+
+
 parser = argparse.ArgumentParser(prog="as:Public Standalone Collector")
 parser.add_argument('mode', choices=["run", "test"])
-parser.add_argument('--db', default=db_sqlite.default_dbpath, help="Use/create sqlite3 database at this location")
+parser.add_argument('--db', nargs='?', action=dbDefaultAction, help="Use/create sqlite3 database at this location")
 parser.add_argument('-r', '--recorder', action='append', default=[],
                     help="Push statuses to the recorder at this hostname.")
 parser.add_argument('-s', '--server', action='append', default=[],
@@ -748,10 +757,11 @@ if __name__ == '__main__':
 
     if args.mode == "run":
         log = logSetup()
-        db_sqlite.checkdb(args.db)
 
         sinks = []
-        sinks.append(sqlitesink(args.db))
+        if args.db is not None:
+            db_sqlite.checkdb(args.db)
+            sinks.append(sqlitesink(args.db))
         sinks.extend([recordersink(i) for i in args.recorder])
 
         # Setup global variables before starting async loop
