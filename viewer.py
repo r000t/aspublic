@@ -16,7 +16,7 @@ config_path = "viewer.toml"
 
 ## Set to True to serve static files from the application. You'll need to do that to run it locally.
 ## If you're running this even semi-publicly, see the README for a sample nginx configuration.
-mountLocalDirectory = False
+mountLocalDirectory = True
 
 
 try:

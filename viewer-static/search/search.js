@@ -67,6 +67,13 @@ async function renderResults(urlParams) {
         query_exp += `<b>and must not have</b> `
         res.debug.query.not_terms.forEach(term => {query_exp += `${term}, `})
     }
+    if (params.has("before")) {
+        query_exp += ` <b>before</> ${params.get("before")}, `
+    }
+
+    if (params.has("after")) {
+        query_exp += ` <b>before</> ${params.get("after")}, `
+    }
 
     document.getElementById("result-stats").innerHTML = `Search for ${query_exp} finished in ${res.debug.dbtime_ms}ms`;
     res.results.forEach(i => {
@@ -75,6 +82,10 @@ async function renderResults(urlParams) {
                            <h3>${i.subject}</h3><p>${escapeHtml(i.text)}</p>
                            <a href="${i.url}">${i.url}</a><span style="float: right;">${i.created}</span></div>`;
     });
+
+    var nextPageParams = new URLSearchParams(params);
+    nextPageParams.set("before", res.results.pop().created);
+    html += `<br /><div style="float: right;"><h2><a href=".?${nextPageParams.toString()}">Older results...</a></h2></div><br />`;
 
     let container = document.querySelector('.results-container');
     container.innerHTML = html;
