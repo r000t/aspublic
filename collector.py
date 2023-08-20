@@ -162,7 +162,7 @@ class sink:
 
             if statuses_flushed:
                 if self.missed:
-                    self.missed -= statuses_flushed
+                    self.missed -= set(statuses_flushed)
             if statuses_flushed != push_statuses:
                 self.missed.update(set(statuses) - set(statuses_flushed))
             log.debug("Sink %s flush finished. Sink backlog size is %i" % (type(self), len(self.missed)))
@@ -200,6 +200,7 @@ class sqlitesink(sink):
         begints = time()
         await db_sqlite.batchwrite(statuses[1], self.dbpath)
         log.info("Flushed %i statuses, took %i ms." % (len(statuses[1]), int((time() - begints) * 1000)))
+        return statuses
 
 
 @define
@@ -208,8 +209,16 @@ class recordersink(sink):
     mapstatuses: bool = field(default=True, kw_only=True)
 
     async def _flush(self, statuses: tuple, *args, **kwargs):
+        begints = time()
         payload = zstd.ZSTD_compress(msgpack.dumps((kwargs["statusmap"], statuses)))
+        compressts = time()
         r = await httpsession.post('%s/api/recorder/checkin' % self.recorderuri, data=payload)
+        networkts = time()
+        log.info("Flushed %i statuses to %s. Compression took %i ms, push took %i ms" % (len(statuses),
+                                                                                         self.recorderuri,
+                                                                                         begints-compressts,
+                                                                                         begints-networkts))
+        return statuses
 
 
 class AttribAccessDict(dict):
