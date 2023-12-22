@@ -59,7 +59,15 @@ proxyOptions.add_argument('--tor', action='store', dest='proxy', const="socks5:/
                           help="Shortcut for --proxy socks5://127.0.0.1:9050")
 
 
-def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
+def importStatus(s: dict, stats: listenerStats, htmlparser: HTML2Text):
+    '''
+    Processes a status from the Mastodon API. Deduplication, content filtering, and opt-out happen here.
+
+    Returns True if the status was unique and accepted for collection. Returns False if the status was
+    rejected for any reason, or if it has been seen before. May return the created status instead of True
+    in the future. The big motivation behind the return value for this is allowing the caller to take
+    specific actions (like forwarding the status to a mirror) only if the status is new and not filtered.
+    '''
     def logwrap(message):
         return "[%s] [%s] %s" % (stats.domain, stats.method, message)
 
@@ -135,6 +143,16 @@ def importStatus(s, stats: listenerStats, htmlparser: HTML2Text):
 
 @define
 class sink:
+    '''
+    A Sink periodically receives batches of statuses. More than one Sink can be registered to a running Collector.
+
+    How often Sinks are processed (flushed) is controlled by `minFlushFreq` and `maxFlushFreq`. The main loop will
+    periodically check if *any* sink is due for a flush based on its `maxFlushFreq`, and push all unsent statuses
+    to *every* sink.
+
+    The Sink will not be flushed less than `minFlushFreq`. In this case, the statuses that would have been flushed
+    are set aside. The same thing happens if the Sink is busy at the time that statuses are pushed to it.
+    '''
     mapstatuses: bool = field(default=False, kw_only=True)
     minFlushFreq: int = field(default=30, kw_only=True)
     maxFlushFreq: int = field(default=60, kw_only=True)
@@ -143,6 +161,12 @@ class sink:
     busy: bool = field(default=False, init=False)
 
     async def flush(self, statuses: tuple, *args, **kwargs):
+        '''
+        Common code for handling a batch of statuses from the main loop. Queues statuses for later if the Sink
+        has been flushed too recently, or if it is still processing the last batch.
+
+        This is an internal function. Subclasses should override `_flush()`
+        '''
         if self.busy:
             if self.mapstatuses:
                 if "statusmap" not in kwargs:
@@ -177,9 +201,24 @@ class sink:
             self.busy = False
 
     async def _flush(self, statuses: tuple, *args, **kwargs):
+        '''
+        An empty function designed to be overriden by subclasses. This is where your code for actually doing
+        somthing with the batch of statuses (processing, storing) would go.
+
+        This function will be run in the main event loop. CPU-heavy processing should be sent to a separate thread.
+
+        You must return a set of statuses that have been processed/stored/etc and can be removed from this Sink's
+        queue. Alternately, you can pass the existing `statuses` list to just mark them all to be cleared.
+        '''
         return ()
 
     def flushable(self):
+        '''
+        Returns True if this Sink is eligible to be flushed to. Both of the following must be true:
+
+        - `minFlushFreq` seconds have passed since the last time this Sink was flushed
+        - This Sink is not busy (it has finished processing the previous batch of statuses
+        '''
         if self.busy:
             return False
         if self.lastflushed + self.minFlushFreq > time():
@@ -187,11 +226,20 @@ class sink:
         return True
 
     def needs_flushed(self):
+        '''
+        Returns True if the Sink needs to be flushed to, meaning more than `maxFlushFreq` seconds have passed
+        since the last time.
+        '''
         return self.lastflushed + self.maxFlushFreq < time()
 
 
 @define
 class sqlitesink(sink):
+    '''
+    A Sink for saving statuses to an sqlite3 database on disk.
+
+    - `dbpath` (str): The path to an existing sqlite3 database
+    '''
     dbpath: str
     mapstatuses: bool = field(default=True, kw_only=True)
     minFlushFreq: int = field(default=60, kw_only=True)
@@ -205,6 +253,11 @@ class sqlitesink(sink):
 
 @define
 class recordersink(sink):
+    '''
+    A Sink for sending collected statuses to a Recorder.
+
+    - `recorderuri` (str): The complete URI to a running Recorder (Example: http://10.0.0.10/ or http://hostname.local/)
+    '''
     recorderuri: str
     mapstatuses: bool = field(default=True, kw_only=True)
 
@@ -339,8 +392,14 @@ class nativeWebsocketsListener():
             # This means that every exception other than CancelledError will retry forever.
             try:
                 async with websockets.connect(self.endpoint, **wsargs) as ws:
+
+                    # Subscribe to public (federated) firehose
                     await ws.send('{ "type": "subscribe", "stream": "public"}')
+
+                    # Mark worker as active for status display
                     self.stats.status = 2
+
+                    # Endlessly listen for and import statuses received from server, ignoring other messages
                     async for message in ws:
                         envelope = json.loads(message)
                         if envelope["event"] != "update":
@@ -351,12 +410,14 @@ class nativeWebsocketsListener():
                                      self.htmlparser)
 
             except (websockets.ConnectionClosedError, TimeoutError) as e:
+                # Exponential backoff, up to a maximum number of retries
                 if retriesLeft:
                     # Reset retry counter if the last retry was more than 5 minutes ago.
                     if (lastRetry + 300) < time():
                         retriesLeft = retries
                         lastBackoff = backoff
 
+                    # Mark worker as "retrying" for status display, then sleep
                     self.stats.status = -1
                     log.debug("[%s] [websockets] Websockets closed: %s; Retrying in %is" % (self.stats.domain, e, lastBackoff))
                     await asyncio.sleep(lastBackoff)
@@ -371,6 +432,10 @@ class nativeWebsocketsListener():
 
 
 class mpyStreamListener(streaming.StreamListener):
+    '''
+    Mastodon.py stream listener that imports statuses it receives, and updates its worker status/stats
+    when the server sends a keepalive, or upon failure.
+    '''
     def __init__(self, stats: listenerStats):
         self.stats = stats
         self.stats.method = "mastodon.py"
@@ -405,6 +470,12 @@ class mpyStreamTester(streaming.StreamListener):
 
 
 async def flushtosinks():
+    '''
+    Flushes all statuses collected so far to all registered Sinks, if any are due to be pushed to.
+
+    The status cache is not cleared. Instead, a copy is made and pushed out to Sinks. Then, each status in the copy
+    is individually deleted from the status cache.
+    '''
     async def flush(sinktoflush: sink):
         log.debug("[flushtosinks] Flushing to %s" % type(sinktoflush))
         try:
@@ -418,7 +489,11 @@ async def flushtosinks():
         except Exception as e:
             log.error("[flushtosinks] Error %s in sink %s" % (repr(e), repr(sinktoflush)))
 
+    # Sinks have a "minimum time" between flushes, and won't be pushed to if this time has elapsed
+    # TODO: Flush to them anyway and handle skipping too-frequent pushes at the Sink
+    # Current logic causes these sinks to miss statuses entirely because statuses are deleted afterwards
     flushable_sinks = [i for i in sinks if i.flushable()]
+
     # Only push if any sinks have passed their max time between flushes
     if any([i.needs_flushed() for i in flushable_sinks]):
         log.debug("[flushtosinks] Flushing to eligible sinks...")
@@ -439,6 +514,11 @@ async def flushtosinks():
 
 
 def mkmpy(domain):
+    '''
+    Creates a Mastodon.py client object, with proxies and custom user-agent, if configured. This is a separate
+    function so that it can be passed into asyncio.to_thread(), as Mastodon.py will make (blocking) web requests
+    during instantiation.
+    '''
     if args.proxy:
         customSession = session()
         customSession.proxies.update({'http': args.proxy, 'https': args.proxy})
@@ -449,19 +529,29 @@ def mkmpy(domain):
 
 
 async def domainWorker(domain, stats):
+    '''
+    The actual domain worker loop. First uses nativeTestDomain() to try and discover the streaming API endpoint.
+    If this initial test fails, the worker exits. If discovery succeeds, it will first try connecting through
+    Websockets, falling back to normal http streaming via Mastodon.py if this fails.
+    '''
     def logwrap(message):
+        '''Decorates log messages with this worker's domain and type'''
         return "[%s] [domainWorker] %s" % (domain, message)
 
+    # Try to discover streaming API endpoint
     result, streamingBase = await nativeTestDomain(domain, retries=5)
     if not result:
         log.info(logwrap("Failed self-testing. Not connecting."))
         stats.status = -2
         return False
 
+    # First, try websockets
     listener = nativeWebsocketsListener("wss://%s" % streamingBase, stats)
     try:
+        # Listens forever, if successful.
         await listener.listen(useragent=args.useragent, proxy=args.proxy)
     except asyncio.CancelledError:
+        # Properly handle application exit
         raise
     except websockets.InvalidStatusCode:
         logmessage = "Refused websockets connection."
@@ -470,6 +560,7 @@ async def domainWorker(domain, stats):
     except Exception as e:
         logmessage = "Unhandled exception %s in websockets." % repr(e)
 
+    # Mark worker as failed for status display. Exit if not configured to fallback to mastodon.py
     stats.status = -2
     if args.nompy:
         log.error(logwrap(logmessage + " Exiting."))
@@ -477,15 +568,17 @@ async def domainWorker(domain, stats):
     else:
         log.debug(logwrap(logmessage + " Falling back to mastodon.py"))
 
-    # Fallback to mastodon.py
+    # Fallback to mastodon.py, which isn't asynchronous and must run in a separate thread
     try:
         setupThread = asyncio.to_thread(mkmpy, domain)
         mpyClient = await setupThread
         streamingHandler = mpyClient.stream_public(mpyStreamListener(stats), run_async=True, reconnect_async=True)
     except:
+        # Mark worker as failed for status display, and exit.
         stats.status = -2
         return False
 
+    # Properly handle application shutdown
     try:
         await shutdownEvent.wait()
     except asyncio.CancelledError:
@@ -496,16 +589,29 @@ async def domainWorker(domain, stats):
 
 
 async def spawnCollectorWorker(domain):
+    '''
+    Spawns a domain worker. Assigns it an ID and adds it to the dict of workers for management and status display.
+    '''
     try:
         wid = max(workers.keys()) + 1
     except ValueError:
         wid = 0
+
     stats = listenerStats(domain=domain)
     workers[wid] = (asyncio.create_task(domainWorker(domain, stats)), stats)
 
 
 async def nativeTestDomain(domain, retries: int = 0, backoff: int = 2):
+    '''
+    Tries to discover the Streaming API endpoint, and whether authentication is needed. Redirections to other
+    domains (streaming.example.com) and endpoints are ideally found here. This is also a separate function so
+    that it is not necessary to spawn an entire worker just to see if a domain supports public streaming.
+
+    Returns (True, streaming_endpoint_url) if it finds a valid streaming endpoint, (False, None) if it cannot.
+    '''
+
     def logwrap(message):
+        # Decorates the log entry with the current domain and the name of this function
         return "[%s] [nativeTester] %s" % (domain, message)
 
     while True:
@@ -514,9 +620,13 @@ async def nativeTestDomain(domain, retries: int = 0, backoff: int = 2):
                 log.debug(logwrap("trying %s" % endpoint))
                 async with httpsession.get('https://%s%s' % (domain, endpoint), timeout=5) as resp:
                     if resp.url.host != domain:
-                        # Retry with new domain
-                        log.debug(logwrap("Redirected to %s, restarting test." % resp.url.host))
+                        # Redirected to a new domain. This typically means the Streaming API is hosted
+                        # on a different subdomain (streaming.example.com). The test will be rerun with
+                        # the new domain, and its result will be passed upwards.
+                        log.debug(logwrap("Redirected to %s, restarting test with new domain." % resp.url.host))
                         return await nativeTestDomain(resp.url.host)
+
+                    # For an error status, move on to the next candidate endpoint
                     if resp.status >= 500:
                         reason = resp.status
                         continue
@@ -524,7 +634,8 @@ async def nativeTestDomain(domain, retries: int = 0, backoff: int = 2):
                         reason = resp.status
                         continue
 
-                    # Check if Streaming API is up, and also get redirected if needed.
+                    # Rewrites the endpoint path with the actual host and path that were returned by the httpd, after
+                    # any redirects. Anything using this endpoint should not be redirected any further.
                     streamingBase = ''.join((resp.url.host, resp.url.path)).rstrip('/public')
                     return True, streamingBase
 
@@ -532,6 +643,8 @@ async def nativeTestDomain(domain, retries: int = 0, backoff: int = 2):
                 log.debug(logwrap("%s Error. Exhausted endpoints to try. Giving up." % reason))
                 return False, None
 
+
+        # Properly handle application exit, separate types of failures for better logging
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
@@ -545,18 +658,24 @@ async def nativeTestDomain(domain, retries: int = 0, backoff: int = 2):
             log.warn(logwrap("Unhandled exception %s during health check. Exiting." % repr(e)))
             return False, None
 
+
+        # If configured to retry, apply an exponential backoff. Otherwise, give up.
         if retries:
-            # Assume temporary problem, retry
             log.debug(logwrap(logmessage + " Retrying in %is") % backoff)
             await asyncio.sleep(backoff)
             backoff = backoff * 2
             retries -= 1
             continue
-        log.debug(logwrap(logmessage + " Not retrying."))
-        return False, None
+        else:
+            log.debug(logwrap(logmessage + " Not retrying."))
+            return False, None
 
 
 async def discoverDomain(domain):
+    '''
+    Task that the main loop can run to see if a domain provides public streaming. If it does, a new worker
+    is created to connect to it.
+    '''
     res = await nativeTestDomain(domain)
     if res[0]:
         log.debug("[%s] [discovery] Passed testing, now listening." % domain)
@@ -567,6 +686,11 @@ async def discoverDomain(domain):
 
 
 async def collectorLoop(domains):
+    '''
+    The as:Public Collector. Spawns workers, then periodically performs housekeeping functions, such as flushing
+    collected statuses to registered Sinks, testing newly-discovered domains (if enabled), and updating the on-screen
+    list of workers, their domains, and their statistics.
+    '''
     global httpsession
     global shutdownEvent
     if args.debug:
@@ -595,7 +719,7 @@ async def collectorLoop(domains):
         try:
             if not args.nostatus:
                 c.clear()
-                statusScreen(c)
+                drawStatusScreen(c)
 
             if lastflush + 15 < time():
                 if len(unsent_statuses):
@@ -620,6 +744,7 @@ async def collectorLoop(domains):
             await asyncio.sleep(5)
 
         except asyncio.CancelledError:
+            # Properly handle application shutdown. Performs a final flush to registered Sinks and raises.
             log.info("Shutting down collector loop...")
             shutdownEvent.set()
             await httpsession.close()
@@ -627,6 +752,7 @@ async def collectorLoop(domains):
             raise
 
         except Exception as e:
+            # Unhandled exception in main loop. Write out relevant information to a file and try to exit cleanly.
             print("(Crash.) In a wrinkle of steel we are gone.")
             tbpath = "error-collector-%s.log" % datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
             traceback.print_tb(e.__traceback__, file=open(tbpath, "w"))
@@ -638,6 +764,7 @@ async def collectorLoop(domains):
 
 
 def buildListFromArgs(direct, lists, nocsv=False):
+    # Combines and deduplicates lists of domains from command-line arguments and files
     items = set(direct)
     for file in lists:
         if nocsv:
@@ -667,7 +794,14 @@ async def testDomains(domains):
         c.print(table)
 
 
-def statusScreen(c):
+def drawStatusScreen(c):
+    statusMap = {0: "INIT",
+                 1: "SETUP",
+                 2: "ACTIVE",
+                 -1: "RETRY",
+                 -2: "FAILED"}
+
+    # Create worker status table
     t = Table()
     t.add_column("ID")
     t.add_column("Domain")
@@ -678,25 +812,23 @@ def statusScreen(c):
     t.add_column("Unique")
     t.add_column("Dropped")
 
-    statusMap = {0: "INIT",
-                 1: "SETUP",
-                 2: "ACTIVE",
-                 -1: "RETRY",
-                 -2: "FAILED"}
-
+    # Add row for each worker
     for k,v in workers.items():
         stats: listenerStats = v[1]
 
+        # Update "Last Status" timestamp, and highlight servers we haven't gotten statuses from in a while.
         if stats.lastStatusTimestamp:
             lastStatusText = richText(datetime.fromtimestamp(stats.lastStatusTimestamp).strftime("%H:%M:%S"))
+
             if (stats.lastStatusTimestamp + 300) < time():
                 lastStatusText.stylize("red")
             elif (stats.lastStatusTimestamp + 30) < time():
                 lastStatusText.stylize("orange")
-
         else:
+            # We have yet to receive any statuses from this server
             lastStatusText = "-"
 
+        # Actually assemble and add row to table
         t.add_row(str(k),
                   stats.domain,
                   statusMap[stats.status],
@@ -704,6 +836,7 @@ def statusScreen(c):
                   lastStatusText,
                   str(stats.receivedStatusCount), str(stats.uniqueStatusCount), str(stats.rejectedStatusCount))
 
+    # Draw a title, the worker status table, and some global stats
     c.print("as:Public Standalone Collector")
     c.print(t)
     c.print("Unwritten statuses: %i" % len(unsent_statuses))
@@ -711,6 +844,13 @@ def statusScreen(c):
 
 
 def logSetup():
+    '''
+    Internal logger setup. Logging to file is also set up here, if enabled. Imports are done here to avoid
+    cluttering the main namespace. This runs before the actual async loop is started, so that logging is
+    available throughout its entire lifecycle.
+
+    Returns the created Logger object.
+    '''
     from aiologger import Logger
     from aiologger.levels import LogLevel
     from aiologger.filters import StdoutFilter
@@ -724,6 +864,8 @@ def logSetup():
     log = Logger(name="collector")
     log.add_handler(AsyncStreamHandler(stream=stdout, level=logLevel, formatter=formatter, filter=StdoutFilter()))
     log.add_handler(AsyncStreamHandler(stream=stderr, level=LogLevel.WARNING, formatter=formatter))
+
+    # Set up logging to file, if enabled.
     if not args.nolog:
         makedirs(args.logdir, exist_ok=True)
         fileLoggingHandler = AsyncFileHandler(filename=path.join(args.logdir, 'collector.log'), formatter=formatter)
@@ -734,43 +876,61 @@ def logSetup():
 
 
 if __name__ == '__main__':
+    '''
+    Parses arguments, imports optional packages if they will be needed, sets up global variables, and then
+    starts the actual async main loop. 
+    '''
     args = parser.parse_args()
+
+    # Imports only needed for debugging
     if args.debug:
         import platform
 
+    # Imports only needed for flushing to a Recorder
     if args.recorder:
         import msgpack
         import zstd
 
+    # Imports only needed if using an http/socks proxy
     if args.proxy:
         from python_socks.async_.asyncio import Proxy
         from python_socks._errors import ProxyError
         from aiohttp_socks import ProxyConnector
         from requests import session
     else:
+        # If not using a proxy, create a dummy ProxyError so Try/Except blocks don't break
         class ProxyError(Exception):
             pass
 
+    # Imports only needed for the status screen (which is on by default)
     if not args.nostatus:
         from rich.console import Console
         from rich.table import Table
         from rich.text import Text as richText
 
+    # buildListFromArgs() combines and deduplicates entries from command-line arguments and on-disk lists.
     domains = buildListFromArgs(args.server, args.list)
     excluded_domains = buildListFromArgs(args.exclude, args.exclude_list)
     excluded_regex = buildListFromArgs(args.exclude_regex, args.exclude_regex_list, nocsv=True)
+
+    # Pre-compile all regular expressions
     if len(excluded_regex):
         excluded_regex_compiled = re.compile('|'.join(["(%s)" % i for i in excluded_regex]))
     else:
         excluded_regex_compiled = False
 
     if args.mode == "run":
+        # Create logging facility that will be passed into app
         log = logSetup()
 
         sinks = []
+
+        # Register sqlite3 Sink
         if args.db is not None:
             db_sqlite.checkdb(args.db)
             sinks.append(sqlitesink(args.db))
+
+        # Instantiate and register Recorder Sinks.
         sinks.extend([recordersink(i) for i in args.recorder])
 
         # Setup global variables before starting async loop
@@ -779,6 +939,7 @@ if __name__ == '__main__':
         dedupe = {}
         discoveredDomains = {i:1 for i in domains}
 
+        # Actually start the Collector.
         try:
             asyncio.run(collectorLoop(domains))
         except KeyboardInterrupt:
