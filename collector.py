@@ -489,7 +489,7 @@ async def flushtosinks():
         except Exception as e:
             log.error("[flushtosinks] Error %s in sink %s" % (repr(e), repr(sinktoflush)))
 
-    # Sinks have a "minimum time" between flushes, and won't be pushed to if this time has elapsed
+    # Sinks have a "minimum time" between flushes, and won't be pushed to if this time hasn't elapsed
     # TODO: Flush to them anyway and handle skipping too-frequent pushes at the Sink
     # Current logic causes these sinks to miss statuses entirely because statuses are deleted afterwards
     flushable_sinks = [i for i in sinks if i.flushable()]
@@ -513,7 +513,7 @@ async def flushtosinks():
             del(unsent_statuses[i.url])
 
 
-def mkmpy(domain):
+def mkmpy(domain, **kwargs):
     '''
     Creates a Mastodon.py client object, with proxies and custom user-agent, if configured. This is a separate
     function so that it can be passed into asyncio.to_thread(), as Mastodon.py will make (blocking) web requests
@@ -524,11 +524,11 @@ def mkmpy(domain):
         customSession.proxies.update({'http': args.proxy, 'https': args.proxy})
     else:
         customSession = None
-    mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent, session=customSession)
+    mpyClient = Mastodon(api_base_url=domain, user_agent=args.useragent, session=customSession, **kwargs)
     return mpyClient
 
 
-async def domainWorker(domain, stats):
+async def domainWorker(domain: str, stats: listenerStats, bearer_token: str = None):
     '''
     The actual domain worker loop. First uses nativeTestDomain() to try and discover the streaming API endpoint.
     If this initial test fails, the worker exits. If discovery succeeds, it will first try connecting through
@@ -539,22 +539,34 @@ async def domainWorker(domain, stats):
         return "[%s] [domainWorker] %s" % (domain, message)
 
     # Try to discover streaming API endpoint
-    result, streamingBase = await nativeTestDomain(domain, retries=5)
+    result, streamingBase = await nativeTestDomain(domain, bearer_token=bearer_token, retries=5)
     if not result:
         log.info(logwrap("Failed self-testing. Not connecting."))
         stats.status = -2
         return False
 
     # First, try websockets
-    listener = nativeWebsocketsListener("wss://%s" % streamingBase, stats)
+    if bearer_token:
+        websocketuri = f"{streamingBase.rstrip('/')}?access_token={bearer_token}"
+    else:
+        websocketuri = streamingBase
+
+    listener = nativeWebsocketsListener("wss://%s" % websocketuri, stats)
+
     try:
         # Listens forever, if successful.
         await listener.listen(useragent=args.useragent, proxy=args.proxy)
     except asyncio.CancelledError:
         # Properly handle application exit
         raise
-    except websockets.InvalidStatusCode:
-        logmessage = "Refused websockets connection."
+    except websockets.InvalidStatusCode as e:
+        if e.status_code == 401:
+            if bearer_token:
+                logmessage = "Refused access token."
+            else:
+                logmessage = "An access token is required."
+        else:
+            logmessage = "Refused websockets connection."
     except websockets.InvalidURI:
         logmessage = "Redirected to %s but we didn't capture it properly." % streamingBase
     except Exception as e:
@@ -570,7 +582,7 @@ async def domainWorker(domain, stats):
 
     # Fallback to mastodon.py, which isn't asynchronous and must run in a separate thread
     try:
-        setupThread = asyncio.to_thread(mkmpy, domain)
+        setupThread = asyncio.to_thread(mkmpy, domain, access_token=bearer_token)
         mpyClient = await setupThread
         streamingHandler = mpyClient.stream_public(mpyStreamListener(stats), run_async=True, reconnect_async=True)
     except:
@@ -588,7 +600,7 @@ async def domainWorker(domain, stats):
         stats.status = -2
 
 
-async def spawnCollectorWorker(domain):
+async def spawnCollectorWorker(domain: str, bearer_token: str = None):
     '''
     Spawns a domain worker. Assigns it an ID and adds it to the dict of workers for management and status display.
     '''
@@ -598,10 +610,10 @@ async def spawnCollectorWorker(domain):
         wid = 0
 
     stats = listenerStats(domain=domain)
-    workers[wid] = (asyncio.create_task(domainWorker(domain, stats)), stats)
+    workers[wid] = (asyncio.create_task(domainWorker(domain, stats, bearer_token=bearer_token)), stats)
 
 
-async def nativeTestDomain(domain, retries: int = 0, backoff: int = 2):
+async def nativeTestDomain(domain, bearer_token: str = None, retries: int = 0, backoff: int = 2):
     '''
     Tries to discover the Streaming API endpoint, and whether authentication is needed. Redirections to other
     domains (streaming.example.com) and endpoints are ideally found here. This is also a separate function so
@@ -618,20 +630,37 @@ async def nativeTestDomain(domain, retries: int = 0, backoff: int = 2):
         try:
             for endpoint in ["/api/v1/streaming/public", "/api/v1/streaming"]:
                 log.debug(logwrap("trying %s" % endpoint))
-                async with httpsession.get('https://%s%s' % (domain, endpoint), timeout=5) as resp:
+
+                if bearer_token:
+                    log.debug(logwrap(f"Using bearer token {bearer_token}"))
+                    headers = {"Authorization": f"Bearer {bearer_token}"}
+                else:
+                    headers = {}
+
+                async with httpsession.get('https://%s%s' % (domain, endpoint), timeout=5, headers=headers) as resp:
                     if resp.url.host != domain:
                         # Redirected to a new domain. This typically means the Streaming API is hosted
                         # on a different subdomain (streaming.example.com). The test will be rerun with
                         # the new domain, and its result will be passed upwards.
                         log.debug(logwrap("Redirected to %s, restarting test with new domain." % resp.url.host))
-                        return await nativeTestDomain(resp.url.host)
+                        return await nativeTestDomain(resp.url.host, bearer_token=bearer_token, retries=retries, backoff=backoff)
+
+
 
                     # For an error status, move on to the next candidate endpoint
                     if resp.status >= 500:
                         reason = resp.status
+                        text = await resp.text()
+                        log.debug(logwrap("%s Error (%s). Moving on." % (reason, text)))
                         continue
                     if resp.status >= 400:
                         reason = resp.status
+                        text = await resp.text()
+                        if "missing access token" in text.lower():
+                            log.debug(logwrap("Streaming API requires authorization. Giving up."))
+                            return False, None
+                        else:
+                            log.debug(logwrap("%s Error (%s). Moving on." % (reason, text)))
                         continue
 
                     # Rewrites the endpoint path with the actual host and path that were returned by the httpd, after
@@ -685,7 +714,7 @@ async def discoverDomain(domain):
         discoveredDomains[domain] = -2
 
 
-async def collectorLoop(domains):
+async def collectorLoop(domains: dict):
     '''
     The as:Public Collector. Spawns workers, then periodically performs housekeeping functions, such as flushing
     collected statuses to registered Sinks, testing newly-discovered domains (if enabled), and updating the on-screen
@@ -709,8 +738,8 @@ async def collectorLoop(domains):
     shutdownEvent = asyncio.Event()
 
     log.debug("Starting workers for %i domains" % len(domains))
-    for domain in domains:
-        await spawnCollectorWorker(domain)
+    for domain, bearer_token in domains.items():
+        await spawnCollectorWorker(domain, bearer_token=bearer_token)
 
     if not args.nostatus:
         c = Console()
@@ -773,6 +802,22 @@ def buildListFromArgs(direct, lists, nocsv=False):
             items.update([i.strip().split(',')[0] for i in open(file).readlines()])
     items.discard('')
     return list(items)
+
+
+def buildListFromArgsWithAccessTokens(direct, lists, nocsv=False):
+    # Combines and deduplicates lists of domains from command-line arguments and files
+    items = {d: None for d in direct}
+    separator = '|'
+    for file in lists:
+        with open(file, 'r') as f:
+            for line in f.readlines():
+                parts = line.strip().split(separator)
+                domain = parts[0]
+                token = parts[1] if len(parts) > 1 else None  # Get token if available
+                items[domain] = token  # Add or update the domain-token pair
+
+    return items
+
 
 
 async def testDomains(domains):
@@ -909,9 +954,9 @@ if __name__ == '__main__':
         from rich.text import Text as richText
 
     # buildListFromArgs() combines and deduplicates entries from command-line arguments and on-disk lists.
-    domains = buildListFromArgs(args.server, args.list)
-    excluded_domains = buildListFromArgs(args.exclude, args.exclude_list)
-    excluded_regex = buildListFromArgs(args.exclude_regex, args.exclude_regex_list, nocsv=True)
+    domains: dict = buildListFromArgsWithAccessTokens(args.server, args.list)
+    excluded_domains: list = buildListFromArgs(args.exclude, args.exclude_list)
+    excluded_regex: list = buildListFromArgs(args.exclude_regex, args.exclude_regex_list, nocsv=True)
 
     # Pre-compile all regular expressions
     if len(excluded_regex):
