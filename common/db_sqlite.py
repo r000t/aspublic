@@ -43,6 +43,15 @@ def initdb(dbpath):
     con.close()
 
 
+async def prune(cutoff: int, dbpath):
+    if type(cutoff) is not int:
+        raise TypeError
+
+    async with aiosqlite.connect(dbpath) as db:
+        await db.execute("DELETE FROM statuses WHERE created < ?;", (cutoff,))
+        await db.commit()
+
+
 async def batchwrite(values: list, dbpath):
     async with aiosqlite.connect(dbpath) as db:
         await db.execute("PRAGMA cache_size=4000;")

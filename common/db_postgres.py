@@ -32,6 +32,15 @@ async def checkdb(dbpath):
         return True
 
 
+async def prune(cutoff: int, dbpath):
+    if type(cutoff) is not int:
+        raise TypeError
+
+    engine = await connect(dbpath)
+    async with engine.begin() as db:
+        await db.execute(text("DELETE FROM statuses WHERE created < :cutoff;"), ({"cutoff": cutoff}))
+
+
 async def batchwrite(values: list, dbpath):
     engine = await connect(dbpath)
     async with engine.begin() as db:

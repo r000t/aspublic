@@ -1,4 +1,6 @@
 # Change db_backend to "sqlite" or "postgres", and change the path to match your setup.
+# Optionally, set prune_days to the number of days of statuses to keep. Older statuses will be periodically deleted
+# Recommended values are 30 for sqlite, 120 for postgres
 
 [database]
 db_backend  = ""

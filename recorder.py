@@ -90,13 +90,34 @@ async def dbflushworker():
 
         print("Flushed %i statuses, took %i ms." % (len(sqlvalues), int((time() - begints) * 1000)))
 
+    async def prunedb():
+        begints = time()
+
+        # Cutoff is the timestamp less prune_days * seconds_in_a_day
+        cutoff = int(time()) - (dbconfig.get("prune_days") * 86400)
+        print("Cutoff is %i" % cutoff)
+
+        if dbconfig["db_backend"].startswith("postgres"):
+            await db_postgres.prune(cutoff, dbconfig["db_url"])
+        elif dbconfig["db_backend"].startswith("sqlite"):
+            await db_sqlite.prune(cutoff, dbconfig["db_url"])
+
+        print("Pruned old statuses from database, took %i ms." % int((time() - begints) * 1000))
+
     lastflush = time()
+    lastprune = 0 # Prune on first flush after startup
     while True:
         await asyncio.sleep(10)
-        if lastflush + 120 < time():
+        if lastflush + 60 < time():
             if len(unflushed_statuses):
                 await flushtodb()
             lastflush = time()
+
+            if dbconfig.get("prune_days", None):
+                # Only run the prune operation once an hour
+                if lastprune + 3600 < time():
+                    await prunedb()
+                    lastprune = time()
 
 
 @app.post("/api/recorder/checkin")
