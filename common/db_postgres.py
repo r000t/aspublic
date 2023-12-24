@@ -24,6 +24,7 @@ async def checkdb(dbpath):
     else:
         print("Connected to database, but tables don't exist. Creating...")
         async with engine.begin() as db:
+            await db.execute(text("CREATE EXTENSION btree_gin;"))
             await db.execute(text("CREATE TABLE statuses (url TEXT NOT NULL PRIMARY KEY, text TEXT, subject TEXT, created BIGINT NOT NULL, language TEXT, bot boolean NOT NULL, reply boolean NOT NULL, attachments boolean NOT NULL)"))
             await db.execute(text("ALTER TABLE statuses ADD ts_text tsvector NULL GENERATED ALWAYS AS (to_tsvector('english'::regconfig, text)) STORED;"))
             await db.execute(text("CREATE INDEX statuses_created ON statuses (created);"))
