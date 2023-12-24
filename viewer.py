@@ -9,7 +9,7 @@ from re import findall
 from time import time
 from datetime import datetime, date
 from common import db_sqlite, db_postgres
-app = FastAPI(title="as:Public Viewer", version="0.1.6")
+app = FastAPI(title="as:Public Viewer", version="0.1.7")
 
 # Path to config file
 config_path = "viewer.toml"

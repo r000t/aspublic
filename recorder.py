@@ -7,7 +7,7 @@ from fastapi import FastAPI, File, Body
 from time import time
 from common import db_sqlite, db_postgres
 from common.ap_types import minimalStatus
-app = FastAPI(title="as:Public Recorder", version="0.1.6")
+app = FastAPI(title="as:Public Recorder", version="0.1.7")
 
 # Path to config file
 config_path = "recorder.toml"
