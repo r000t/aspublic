@@ -17,9 +17,13 @@ A browser-based frontend for this API is also provided.
 
 
 ### Collector
-Install dependencies: 
-```
+Create a virtual environment and install dependencies: 
+```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
+
+# Mastodon.py is only needed for the Collector
 git clone https://github.com/halcy/Mastodon.py
 mv Mastodon.py/mastodon .
 rm -rf Mastodon.py
